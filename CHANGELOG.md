@@ -67,6 +67,10 @@ All notable changes to this crate are documented here. The format follows
   (`SignInMethod::Passkey`).
 - `ConfigBuilder::build` refuses any two equal cookie names (`Error::Config("cookie names
   must differ")`).
+- `PasswordHasher::verify` no longer runs a stored hash whose parameters cost more than
+  1 GiB, 16 passes or 16 lanes (or the hasher's own, if higher): it checks the dummy and
+  answers `false`. Argon2 verifies with the stored parameters, so an imported or tampered
+  hash could hang a sign-in or exhaust memory.
 - An `http://127.0.0.1` or `http://[::1]` origin is accepted like `http://localhost`.
 - `password_only` is reserved like latchkey's other method names: `AppMethod::new` refuses
   it, and a stored `password_only` parses as `SignInMethod::PasswordOnly`.

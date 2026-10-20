@@ -253,13 +253,16 @@ impl PasswordHasher {
     /// With `stored` = `None` (unknown account, or no password set) it still runs a full hash
     /// against the dummy and returns `false`, so timing does not tell known accounts from
     /// unknown ones. Passwords longer than four times [`MAX_LEN`] bytes are not hashed as
-    /// given: the dummy is checked instead and the answer is `false`.
+    /// given: the dummy is checked instead and the answer is `false`. So is a stored hash
+    /// whose own parameters cost more than 1 GiB, 16 passes or 16 lanes (or the hasher's
+    /// parameters, if those are higher): Argon2 verifies with the stored parameters, and an
+    /// imported or tampered hash must not tie up the server.
     #[must_use]
     pub fn verify(&self, password: &str, stored: Option<&PasswordHash>) -> bool {
         let argon2 = argon2(self.params.clone());
         let too_long = password.len() > MAX_LEN * 4;
         let (candidate, real) = match stored {
-            Some(stored) if !too_long => (stored, true),
+            Some(stored) if !too_long && affordable(stored, &self.params) => (stored, true),
             _ => (&self.dummy, false),
         };
         let password = if too_long { "" } else { password };
@@ -268,6 +271,25 @@ impl PasswordHasher {
             .is_ok();
         matched && real
     }
+}
+
+/// The most a stored hash may cost to verify, unless the hasher's own parameters cost more:
+/// 1 GiB, 16 passes, 16 lanes. Argon2 verifies with the parameters in the stored string, so
+/// an imported or tampered hash could otherwise make one sign-in allocate many gigabytes or
+/// run for hours.
+const MAX_STORED_MEMORY_KIB: u32 = 1024 * 1024;
+const MAX_STORED_ITERATIONS: u32 = 16;
+const MAX_STORED_PARALLELISM: u32 = 16;
+
+fn affordable(stored: &PasswordHash, own: &Params) -> bool {
+    argon2::PasswordHash::new(stored.as_str())
+        .ok()
+        .and_then(|parsed| Params::try_from(&parsed).ok())
+        .is_some_and(|params| {
+            params.m_cost() <= MAX_STORED_MEMORY_KIB.max(own.m_cost())
+                && params.t_cost() <= MAX_STORED_ITERATIONS.max(own.t_cost())
+                && params.p_cost() <= MAX_STORED_PARALLELISM.max(own.p_cost())
+        })
 }
 
 fn argon2(params: Params) -> Argon2<'static> {
@@ -404,6 +426,28 @@ mod tests {
         }
         let same = PasswordHash::try_from(format!("$argon2id$v=19$m=64,t=1,p=1${salt}${hash32}"))?;
         assert!(!hasher.needs_rehash(&same));
+        Ok(())
+    }
+
+    #[test]
+    fn hashes_too_costly_to_verify_are_refused_without_running_them() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let salt = "c29tZXNhbHRzb21lc2FsdA";
+        let hash32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        for params in [
+            "m=4194304,t=1,p=1",
+            "m=64,t=4294967295,p=1",
+            "m=8192,t=1,p=1024",
+        ] {
+            let stored =
+                PasswordHash::try_from(format!("$argon2id$v=19${params}${salt}${hash32}"))?;
+            assert!(
+                !hasher.verify("correct horse battery", Some(&stored)),
+                "{params}"
+            );
+            assert!(hasher.needs_rehash(&stored));
+        }
         Ok(())
     }
 
