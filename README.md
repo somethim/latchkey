@@ -89,10 +89,15 @@ account cannot step up. That lets anyone holding a stolen session cookie lock th
 out, and lets anonymous sign-in guesses stop a signed-in owner from re-verifying. To count
 them per session instead:
 
-```rust,ignore
-let config = Config::builder("owner@example.com", "https://home.example.com")
-    .step_up_failures(StepUpFailures::PerSession { limit: 5 })
-    .build()?;
+```rust
+use latchkey::{Config, Error, StepUpFailures};
+
+fn config() -> Result<Config, Error> {
+    Config::builder("owner@example.com", "https://home.example.com")
+        .step_up_failures(StepUpFailures::PerSession { limit: 5 })
+        .build()
+}
+assert!(config().is_ok());
 ```
 
 Then step-up neither consults nor feeds the lockout and throttle. Each wrong guess emits
@@ -114,10 +119,15 @@ latchkey asks for a second factor after every password, and setup does not finis
 one. Accounts imported from another system with only a password, or apps that let users
 enrol TOTP or a passkey later, can opt in:
 
-```rust,ignore
-let config = Config::builder("owner@example.com", "https://home.example.com")
-    .password_only(PasswordOnly::AllowedUntilEnrolled)
-    .build()?;
+```rust
+use latchkey::{Config, Error, PasswordOnly};
+
+fn config() -> Result<Config, Error> {
+    Config::builder("owner@example.com", "https://home.example.com")
+        .password_only(PasswordOnly::AllowedUntilEnrolled)
+        .build()
+}
+assert!(config().is_ok());
 ```
 
 Then an account with a password and no second factor signs in with the password alone
@@ -135,19 +145,51 @@ now, rng)` (the user typed their address; the challenge lists their passkeys) an
 `start_discoverable(now, rng)` return a third value, a one-off binding token. The ceremony
 keeps only its hash (`Binding::Browser`).
 
-```rust,ignore
-// POST /sign-in/passkey/start
-let (challenge, ceremony, binding) = rp.start_sign_in(account.id, &passkeys, now, &mut rng)?;
-ceremonies.insert(ceremony.id(), serde_json::to_string(&ceremony)?);
-let cookie = SetCookie::new(config.ceremony_cookie_name().clone(), &binding, CEREMONY_TTL);
-// answer with `challenge` and `ceremony.id()`, and send `cookie.header_value()`
+```rust
+#[cfg(feature = "passkeys")]
+mod passkey_sign_in {
+    use latchkey::http::{SetCookie, find_cookie};
+    use latchkey::passkey::webauthn_rs::prelude::{
+        AuthenticationResult, Passkey, PasskeyAuthentication, PublicKeyCredential,
+        RequestChallengeResponse,
+    };
+    use latchkey::passkey::{CEREMONY_TTL, Ceremony, RelyingParty};
+    use latchkey::{Config, CryptoRng, Error, UserId};
+    use time::OffsetDateTime;
 
-// POST /sign-in/passkey/finish {ceremony_id, credential}
-let ceremony: Ceremony<PasskeyAuthentication> = serde_json::from_str(&ceremonies.remove(&id)?)?;
-let user = ceremony.binding().user().ok_or(Error::SignInFailed)?;
-let state = ceremony.into_browser_state(find_cookie(cookies, config.ceremony_cookie_name().as_str())?, now)?;
-let result = rp.finish_authentication(&credential, &state)?;
-// record_use, then SignInEvent::DiscoverablePasskey { account, verified, client }
+    /// POST /sign-in/passkey/start {email}: store the ceremony under `ceremony.id()`, answer
+    /// with the challenge and that id, and send the cookie.
+    pub fn start(
+        config: &Config,
+        rp: &RelyingParty,
+        user: UserId,
+        passkeys: &[Passkey],
+        now: OffsetDateTime,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(RequestChallengeResponse, Ceremony<PasskeyAuthentication>, SetCookie), Error> {
+        let (challenge, ceremony, binding) = rp.start_sign_in(user, passkeys, now, rng)?;
+        let cookie = SetCookie::new(config.ceremony_cookie_name().clone(), &binding, CEREMONY_TTL);
+        Ok((challenge, ceremony, cookie))
+    }
+
+    /// POST /sign-in/passkey/finish {ceremony_id, credential}: `ceremony` is the one the app
+    /// removed from storage by the posted id. Then `passkey::record_use` on the passkeys of
+    /// the returned user, and `SignInEvent::DiscoverablePasskey { account, verified, client }`.
+    pub fn finish(
+        config: &Config,
+        rp: &RelyingParty,
+        ceremony: Ceremony<PasskeyAuthentication>,
+        cookie_headers: &[&str],
+        credential: &PublicKeyCredential,
+        now: OffsetDateTime,
+    ) -> Result<(UserId, AuthenticationResult), Error> {
+        let user = ceremony.binding().user().ok_or(Error::SignInFailed)?;
+        let name = config.ceremony_cookie_name().as_str();
+        let binding = find_cookie(cookie_headers.iter().copied(), name).unwrap_or_default();
+        let state = ceremony.into_browser_state(binding, now)?;
+        Ok((user, rp.finish_authentication(credential, &state)?))
+    }
+}
 ```
 
 Only the browser holding the cookie can finish the ceremony it started.
@@ -157,11 +199,16 @@ Only the browser holding the cookie can finish the ceremony it started.
 Cookies are `__Host-` and `Secure`. Chrome and Firefox keep such cookies on
 `http://localhost`, Safari does not. For local development over plain HTTP:
 
-```rust,ignore
-let config = Config::builder("owner@example.com", "http://localhost:3000")
-    .danger_insecure_localhost_cookies()
-    .build()?;
-assert_eq!(config.cookie_name().as_str(), "latchkey"); // no __Host-, no Secure
+```rust
+use latchkey::{Config, Error};
+
+fn development_config() -> Result<Config, Error> {
+    Config::builder("owner@example.com", "http://localhost:3000")
+        .danger_insecure_localhost_cookies()
+        .build()
+}
+let config = development_config();
+assert_eq!(config.map(|c| c.cookie_name().to_string()), Ok("latchkey".into())); // no __Host-
 ```
 
 `build` refuses this for any origin other than `http://localhost`, `http://127.0.0.1` or
@@ -173,78 +220,155 @@ accident. Read cookies by `config.cookie_name().as_str()`, not a hard-coded name
 A condensed version of `examples/password_totp.rs` (`cargo run --example password_totp`).
 Storage is a `HashMap` here; use whatever you like.
 
-```rust,ignore
-use latchkey::account::AccountKey;
+```rust
+use std::collections::HashMap;
+
+use latchkey::account::{AccountKey, Lockout};
 use latchkey::flow::sign_in::{SignIn, SignInEvent};
 use latchkey::flow::{Client, CodeMaterial, Effect, TotpMaterial};
+use latchkey::limits::WrongPasswordThrottle;
+use latchkey::password::{PasswordHash, PasswordHasher};
+use latchkey::recovery::RecoveryCodeHash;
+use latchkey::seal::DataKey;
+use latchkey::session::Session;
+use latchkey::token::TokenHash;
+use latchkey::totp::TotpStep;
+use latchkey::{Account, Config, CryptoRng, Email, Error, UserId};
+use time::OffsetDateTime;
 
-// Once at start-up.
-let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
-let hasher = PasswordHasher::new(config.password(), &mut rng)?;   // builds the dummy hash
-let data_key = DataKey::new(&keys.data);                          // not in the database
-let mut throttle = WrongPasswordThrottle::new(config.rate_limits()); // behind a Mutex
-let mut per_ip = RateLimiter::per_minute(config.rate_limits().per_ip_per_minute);
-
-// POST /sign-in {email, password}
-per_ip.check(&format!("ip:{ip}"), now)?;
-let row = users.values().find(|row| Some(&row.account.email) == Email::parse(&email).ok().as_ref());
-let step = SignIn::Start.advance(&config, SignInEvent::Password {
-    login: email.clone(),
-    account: row.map(|row| row.account.clone()),
-    wrong_passwords: throttle.window(&AccountKey::from_login(&email)),
-}, now, &mut rng).map_err(|refusal| refusal.error)?;           // throttled or locked: no hash
-
-let matched = hasher.verify(&password, row.map(|row| &row.password)); // on a blocking thread
-match step.state.advance(&config, SignInEvent::PasswordChecked { matched, client }, now, &mut rng) {
-    Ok(step) => { apply(step.effects)?; /* reply with the CSRF token of the new session */ }
-    Err(refusal) => { apply(refusal.effects)?; return Err(refusal.error); }
+/// An account as the app stores it: a database row in a real app.
+struct Row {
+    account: Account,
+    password: PasswordHash,
+    sealed_totp: Vec<u8>,
+    last_step: Option<TotpStep>,
+    recovery: Vec<(RecoveryCodeHash, bool)>,
 }
 
-// POST /sign-in/code {code}, with the second-factor session cookie
-let hash = TokenHash::of(cookie).ok_or(Error::Unauthorized)?;
-let session = sessions.get(&hash).cloned().ok_or(Error::Unauthorized)?;
-let row = &users[&session.user_id];
-let material = CodeMaterial {
-    totp: Some(TotpMaterial {
-        secret: data_key.open_totp(row.account.id, &row.sealed_totp)?,
-        last_used_step: row.last_step,
-    }),
-    recovery_codes: row.unused_recovery_hashes(),
-};
-match SignIn::second_factor(session, row.account.clone())
-    .advance(&config, SignInEvent::Code { code, material, client }, now, &mut rng)
-{
-    Ok(step) => apply(step.effects)?,          // new full session replaces the pending one
-    Err(refusal) => { apply(refusal.effects)?; return Err(refusal.error); }
+/// Built once at start-up.
+struct App {
+    config: Config,                  // Config::builder(owner, origin).build()?
+    hasher: PasswordHasher,          // PasswordHasher::new(config.password(), &mut rng)?
+    data_key: DataKey,               // DataKey::new(&keys.data), kept out of the database
+    throttle: WrongPasswordThrottle, // WrongPasswordThrottle::new(config.rate_limits())
+    users: HashMap<UserId, Row>,
+    sessions: HashMap<TokenHash, Session>,
 }
 
-fn apply(effects: Vec<Effect>) -> Result<(), Error> {
-    for effect in effects {
-        match effect {
-            Effect::StoreSession { session, replaces } => { /* delete `replaces`, insert by session.token_hash */ }
-            Effect::SetCookie(cookie) => { /* response header: cookie.header_value() */ }
-            Effect::RecordFailure { user_id, at, ip_tag } => {
-                // One statement: UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures
-                // then, with n: locked_until = config.lockout().locked_until(n, at),
-                // audit config.lockout().lockout_event(user_id, n, at, ip_tag)
+impl App {
+    /// POST /sign-in {email, password}
+    fn sign_in(
+        &mut self,
+        email: &str,
+        password: &str,
+        client: Client,
+        now: OffsetDateTime,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(), Error> {
+        let address = Email::parse(email).ok();
+        let row = self.users.values().find(|row| Some(&row.account.email) == address.as_ref());
+        let event = SignInEvent::Password {
+            login: email.to_owned(),
+            account: row.map(|row| row.account.clone()),
+            wrong_passwords: self.throttle.window(&AccountKey::from_login(email)),
+        };
+        // Throttled or locked: refused before any hashing.
+        let step = SignIn::Start
+            .advance(&self.config, event, now, rng)
+            .map_err(|refusal| refusal.error)?;
+        // On a blocking thread in a server. An unknown address (None) still costs a hash.
+        let matched = self.hasher.verify(password, row.map(|row| &row.password));
+        let event = SignInEvent::PasswordChecked { matched, client };
+        match step.state.advance(&self.config, event, now, rng) {
+            Ok(step) => self.apply(step.effects, now), // reply with the new session's CSRF token
+            Err(refusal) => {
+                self.apply(refusal.effects, now)?;
+                Err(refusal.error)
             }
-            Effect::ClearFailures { user_id } => { /* failures = 0, locked_until = NULL */ }
-            Effect::RecordWrongPassword { key } => throttle.record(&key, now),
-            Effect::RecordStepUpFailure { token_hash } => {
-                // StepUpFailures::PerSession only. One statement:
-                // UPDATE sessions SET step_up_failures = step_up_failures + 1 WHERE token_hash = ?
-            }
-            Effect::UseTotpStep { user_id, step } => {
-                // UPDATE ... SET last_step = ? WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)
-                // zero rows updated: refuse with Error::SignInFailed
-            }
-            Effect::RememberDevice { user_id, device_hash, seen_at } => { /* upsert */ }
-            Effect::SendMail(mail) => { /* queue mail.to, mail.subject(), mail.text() */ }
-            Effect::Audit(event) => { /* append */ }
-            _ => {}
         }
     }
-    Ok(())
+
+    /// POST /sign-in/code {code}, with the second-factor session's cookie
+    fn code(
+        &mut self,
+        cookie: &str,
+        code: String,
+        client: Client,
+        now: OffsetDateTime,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(), Error> {
+        let hash = TokenHash::of(cookie).ok_or(Error::Unauthorized)?;
+        let session = self.sessions.get(&hash).cloned().ok_or(Error::Unauthorized)?;
+        let row = self.users.get(&session.user_id).ok_or(Error::Unauthorized)?;
+        let material = CodeMaterial {
+            totp: Some(TotpMaterial {
+                secret: self.data_key.open_totp(row.account.id, &row.sealed_totp)?,
+                last_used_step: row.last_step,
+            }),
+            recovery_codes: row.recovery.iter().filter(|(_, used)| !used).map(|(h, _)| *h).collect(),
+        };
+        let event = SignInEvent::Code { code, material, client };
+        match SignIn::second_factor(session, row.account.clone()).advance(&self.config, event, now, rng) {
+            Ok(step) => self.apply(step.effects, now), // a full session replaces the pending one
+            Err(refusal) => {
+                self.apply(refusal.effects, now)?;
+                Err(refusal.error)
+            }
+        }
+    }
+
+    /// Carries out every effect, in order: storage in one transaction, then mail.
+    fn apply(&mut self, effects: Vec<Effect>, now: OffsetDateTime) -> Result<(), Error> {
+        for effect in effects {
+            match effect {
+                Effect::StoreSession { session, replaces } => {
+                    if let Some(old) = replaces {
+                        self.sessions.remove(&old);
+                    }
+                    self.sessions.insert(session.token_hash, session);
+                }
+                Effect::SetCookie(cookie) => {
+                    let _header = cookie.header_value(); // add to the response
+                }
+                Effect::RecordFailure { user_id, at, ip_tag } => {
+                    // In SQL, one statement:
+                    // UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures
+                    let row = self.users.get_mut(&user_id).ok_or(Error::NotFound)?;
+                    let n = row.account.lockout.failures.saturating_add(1);
+                    row.account.lockout.failures = n;
+                    if let Some(until) = self.config.lockout().locked_until(n, at) {
+                        row.account.lockout.locked_until = Some(until);
+                    }
+                    let _lock = self.config.lockout().lockout_event(user_id, n, at, ip_tag); // append if Some
+                }
+                Effect::ClearFailures { user_id } => {
+                    let row = self.users.get_mut(&user_id).ok_or(Error::NotFound)?;
+                    row.account.lockout = Lockout::default();
+                }
+                Effect::RecordWrongPassword { key } => self.throttle.record(&key, now),
+                Effect::UseTotpStep { user_id, step } => {
+                    // Compare-and-set: UPDATE ... SET last_step = ?
+                    //   WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)
+                    let row = self.users.get_mut(&user_id).ok_or(Error::SignInFailed)?;
+                    if row.last_step.is_some_and(|last| last >= step) {
+                        return Err(Error::SignInFailed); // the code raced another request
+                    }
+                    row.last_step = Some(step);
+                }
+                Effect::UseRecoveryCode { user_id, hash } => {
+                    let row = self.users.get_mut(&user_id).ok_or(Error::SignInFailed)?;
+                    let code = row.recovery.iter_mut().find(|(h, used)| *h == hash && !used);
+                    code.ok_or(Error::SignInFailed)?.1 = true;
+                }
+                Effect::SendMail(_mail) => { /* after commit: mail.to, mail.subject(), mail.text() */ }
+                Effect::Audit(_event) => { /* append */ }
+                // RememberDevice, RecordStepUpFailure and the effects of the other flows: see
+                // the documentation of `Effect`.
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 ```
 

@@ -122,6 +122,11 @@ pub use rand_core::CryptoRng;
 #[cfg(test)]
 mod proptests;
 
+/// Compiles and runs the README's examples as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 /// A `ChaCha12` generator seeded once from the operating system: a convenient
 /// [`CryptoRng`] to pass to latchkey. Keep one per thread or behind a lock, or create one
 /// per request.
