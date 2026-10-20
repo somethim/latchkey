@@ -46,6 +46,15 @@ SQLite database keeps working with the app's own queries.
 10. Replace `ManualClock` in tests with explicit `now` values and `TestMailer` with the
     `SendMail` effects (`Mail::link_token()` reads the token).
 
+## Tokens from another system
+
+`TokenHash::of` accepts only latchkey's 43-character tokens. For session cookies, links or
+API keys another system issued, look them up with `TokenHash::of_foreign(presented)`: the
+SHA-256 of the token text. Rows that already hold that hash keep working; plaintext tokens
+are replaced by their `of_foreign` hash once; any other stored form (HMAC, salted or slow
+hash) cannot be matched, so keep the old look-up until those tokens expire. Replace a
+foreign session with a latchkey one on first use.
+
 ## Pitfalls
 
 - Do not drop a `Refusal`'s effects: the lockout and the audit log depend on them.

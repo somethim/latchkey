@@ -38,6 +38,10 @@ All notable changes to this crate are documented here. The format follows
   only its hash), finished with `Ceremony::into_browser_state(binding_token, now)`.
 - `ConfigBuilder::ceremony_cookie_name` / `Config::ceremony_cookie_name` (default
   `__Host-latchkey_ceremony`) for the binding token's cookie.
+- `TokenHash::of_foreign` hashes tokens latchkey did not issue (22 to 512 bytes of
+  printable ASCII, `token::FOREIGN_MIN_LEN` / `FOREIGN_MAX_LEN`) the same way as its own, for
+  porting sessions, links or API keys from another system; its documentation says which
+  stored forms carry over.
 
 ### Changed
 

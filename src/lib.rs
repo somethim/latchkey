@@ -165,6 +165,7 @@ pub mod fuzzing {
         let text = String::from_utf8_lossy(data);
         let now = OffsetDateTime::UNIX_EPOCH;
         let _ = crate::token::TokenHash::of(&text);
+        let _ = crate::token::TokenHash::of_foreign(&text);
         let _ = crate::recovery::RecoveryCodeHash::of(&text);
         let secret = crate::totp::TotpSecret::from_bytes(vec![0; 20]);
         let _ = crate::totp::verify(&secret, &text, None, now);

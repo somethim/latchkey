@@ -23,7 +23,7 @@ audit trail, now as pure functions and state machines.
 | `totp` | `TotpSecret`, `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
 | `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
 | `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
-| `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, constant-time compare |
+| `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, `TokenHash::of_foreign` for tokens another system issued, constant-time compare |
 | `seal` | `DataKey`: AES-256-GCM with associated data per owner and kind, compatible with 0.2's stored values |
 | `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
 | `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
