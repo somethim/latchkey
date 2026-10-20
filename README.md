@@ -19,8 +19,8 @@ audit trail, now as pure functions and state machines.
 
 | Module | What it does |
 |---|---|
-| `password` | `PasswordHasher`: Argon2id hash/verify, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
-| `totp` | `TotpSecret`, `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
+| `password` | `PasswordHasher`: Argon2id hash/verify, `needs_rehash` for hashes made with other parameters, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
+| `totp` | `TotpSecret` (`from_base32` to import), `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
 | `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
 | `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
 | `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, `TokenHash::of_foreign` for tokens another system issued, constant-time compare |

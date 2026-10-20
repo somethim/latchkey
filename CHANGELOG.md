@@ -46,6 +46,11 @@ All notable changes to this crate are documented here. The format follows
   names lose their `__Host-` prefix and cookies are sent without `Secure`. `build` refuses
   it unless the origin is `http://localhost`, `http://127.0.0.1` or `http://[::1]`.
   `Config::insecure_localhost_cookies` and `CookieName::is_secure` report it.
+- `PasswordHasher::needs_rehash(stored)`: whether a stored hash was made with another
+  algorithm, Argon2 version, cost or output length than the hasher's, for upgrading hashes
+  after a successful `verify`.
+- `TotpSecret::from_base32` and `totp::MIN_SECRET_BYTES` for importing TOTP secrets another
+  system enrolled (80-bit secrets are refused: those accounts enrol again).
 
 ### Changed
 

@@ -39,6 +39,8 @@ pub const STEP_SECS: u64 = 30;
 pub const SKEW: u16 = 1;
 /// Bytes in a secret from [`TotpSecret::random`].
 pub const SECRET_BYTES: usize = 20;
+/// The shortest secret latchkey verifies codes against, in bytes (128 bits, RFC 4226).
+pub const MIN_SECRET_BYTES: usize = 16;
 
 /// A TOTP shared secret. Redacted `Debug`, zeroed on drop. Seal it with
 /// [`DataKey`](crate::seal::DataKey) before storing it.
@@ -57,6 +59,57 @@ impl TotpSecret {
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+
+    /// Decodes a base32 secret (RFC 4648, as authenticator apps and `otpauth://` URLs carry
+    /// it), for importing secrets another system enrolled. Case, spaces, dashes and `=`
+    /// padding are ignored.
+    ///
+    /// Older systems often enrolled 80-bit secrets (16 base32 characters). latchkey does not
+    /// verify codes against secrets under [`MIN_SECRET_BYTES`], so those accounts must enrol
+    /// TOTP again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] with `totp_secret_base32` for a character outside the
+    /// base32 alphabet, or `totp_secret_too_short` for fewer than [`MIN_SECRET_BYTES`] bytes.
+    ///
+    /// ```
+    /// use latchkey::totp::TotpSecret;
+    ///
+    /// let secret = TotpSecret::from_base32("jbsw y3dp ehpk 3pxp jbsw y3dp ehpk 3pxp")?;
+    /// assert_eq!(secret.expose_secret().len(), 20);
+    /// assert_eq!(secret.to_base32(), "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP");
+    /// assert!(TotpSecret::from_base32("JBSWY3DPEHPK3PXP").is_err()); // 80 bits
+    /// # Ok::<(), latchkey::Error>(())
+    /// ```
+    pub fn from_base32(encoded: &str) -> Result<Self, Error> {
+        let mut bytes = Vec::with_capacity(encoded.len() * 5 / 8);
+        let mut buffer: u32 = 0;
+        let mut bits: u32 = 0;
+        let symbols = encoded
+            .trim_end_matches(|c: char| c == '=' || c.is_whitespace())
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-');
+        for symbol in symbols {
+            let Some(value) = base32_value(symbol) else {
+                bytes.zeroize();
+                return Err(Error::InvalidRequest("totp_secret_base32"));
+            };
+            buffer = (buffer << 5) | u32::from(value);
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                bytes.push(u8::try_from((buffer >> bits) & 0xff).unwrap_or_default());
+                buffer &= (1 << bits) - 1;
+            }
+        }
+        buffer.zeroize();
+        if bytes.len() < MIN_SECRET_BYTES {
+            bytes.zeroize();
+            return Err(Error::InvalidRequest("totp_secret_too_short"));
+        }
+        Ok(Self(bytes))
     }
 
     /// The raw secret, to seal for storage.
@@ -175,6 +228,14 @@ impl Drop for Enrolment {
     fn drop(&mut self) {
         self.secret_base32.zeroize();
         self.otpauth_url.zeroize();
+    }
+}
+
+fn base32_value(symbol: char) -> Option<u8> {
+    match symbol.to_ascii_uppercase() {
+        c @ 'A'..='Z' => u8::try_from(c).ok().map(|c| c - b'A'),
+        c @ '2'..='7' => u8::try_from(c).ok().map(|c| c - b'2' + 26),
+        _ => None,
     }
 }
 
@@ -363,6 +424,51 @@ mod tests {
             verify(&secret, "123456", None, at(1_800_000_000)),
             Err(TotpRefusal::Mismatch)
         );
+    }
+
+    #[test]
+    fn base32_secrets_import_and_round_trip() -> Result<(), Error> {
+        let secret = TotpSecret::random(&mut crate::test_rng());
+        let encoded = secret.to_base32();
+        assert_eq!(TotpSecret::from_base32(&encoded)?, secret);
+        assert_eq!(TotpSecret::from_base32(&encoded.to_lowercase())?, secret);
+        let spaced: String = encoded
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| (i > 0 && i % 4 == 0).then_some(' ').into_iter().chain([c]))
+            .collect();
+        assert_eq!(TotpSecret::from_base32(&spaced)?, secret);
+        // RFC 4648 test vector, padded.
+        let padded = TotpSecret::from_base32("MZXW6YTBOI======MZXW6YTBOI======");
+        assert_eq!(
+            padded.err(),
+            Some(Error::InvalidRequest("totp_secret_base32")),
+            "padding only at the end"
+        );
+        let foobar = TotpSecret::from_base32("MZXW6YTBOJWW6YTBOJWW6YTBOI======")?;
+        assert_eq!(foobar.expose_secret(), b"foobarmobarmobar");
+        // A code from an imported secret verifies like any other.
+        let now = at(1_800_000_000);
+        let imported = TotpSecret::from_base32(&encoded)?;
+        assert!(verify(&imported, &secret.code_at(now)?, None, now).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn base32_secrets_must_be_valid_and_long_enough() {
+        assert_eq!(
+            TotpSecret::from_base32("JBSWY3DPEHPK3PXP").err(),
+            Some(Error::InvalidRequest("totp_secret_too_short"))
+        );
+        assert_eq!(
+            TotpSecret::from_base32("JBSWY3DPEHPK3PXP1BSWY3DPEHPK3PXP").err(),
+            Some(Error::InvalidRequest("totp_secret_base32"))
+        );
+        assert_eq!(
+            TotpSecret::from_base32("").err(),
+            Some(Error::InvalidRequest("totp_secret_too_short"))
+        );
+        assert!(TotpSecret::from_base32("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PX\u{e9}").is_err());
     }
 
     #[test]

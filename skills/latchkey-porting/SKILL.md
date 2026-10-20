@@ -55,6 +55,17 @@ are replaced by their `of_foreign` hash once; any other stored form (HMAC, salte
 hash) cannot be matched, so keep the old look-up until those tokens expire. Replace a
 foreign session with a latchkey one on first use.
 
+## Passwords and TOTP from another system
+
+- Argon2id PHC strings load with `PasswordHash::try_from`. After a successful
+  `hasher.verify`, `hasher.needs_rehash(&stored)` says whether to hash the password again
+  with `hasher.hash` (not `hash_new_password`) and store it: that upgrades weaker or
+  imported parameters as users sign in. Hashes in other formats do not verify.
+- Import base32 TOTP secrets with `TotpSecret::from_base32` and seal them with
+  `DataKey::seal_totp`. Secrets under 128 bits (16-character, 80-bit secrets) are refused:
+  ask those accounts to enrol again, and allow sign-in meanwhile only if you opt into
+  `PasswordOnly::AllowedUntilEnrolled`.
+
 ## Pitfalls
 
 - Do not drop a `Refusal`'s effects: the lockout and the audit log depend on them.

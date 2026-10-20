@@ -198,6 +198,56 @@ impl PasswordHasher {
         self.hash(password, rng)
     }
 
+    /// Whether `stored` was made with anything other than this hasher's parameters: another
+    /// algorithm or Argon2 version, other memory, iteration or lane counts, or another output
+    /// length. Unparseable values need a rehash too.
+    ///
+    /// Check it after [`verify`](Self::verify) succeeds, while the password is at hand: hash
+    /// it again with [`hash`](Self::hash) (not
+    /// [`hash_new_password`](Self::hash_new_password), whose length policy an older password
+    /// may not meet) and store the new hash in place of the old one. Hashes imported from
+    /// another system with weaker parameters, or made before
+    /// [`ConfigBuilder::password`](crate::ConfigBuilder::password) was raised, are upgraded
+    /// as their users sign in.
+    ///
+    /// ```
+    /// use latchkey::password::{PasswordHasher, PasswordParams};
+    ///
+    /// # fn main() -> Result<(), latchkey::Error> {
+    /// let mut rng = latchkey::os_rng()?;
+    /// let old = PasswordHasher::new(PasswordParams::new(64, 1, 1)?, &mut rng)?;
+    /// let stored = old.hash("correct horse battery", &mut rng)?;
+    /// assert!(!old.needs_rehash(&stored));
+    ///
+    /// let current = PasswordHasher::new(PasswordParams::new(128, 2, 1)?, &mut rng)?;
+    /// if current.verify("correct horse battery", Some(&stored)) && current.needs_rehash(&stored) {
+    ///     let upgraded = current.hash("correct horse battery", &mut rng)?;
+    ///     assert!(!current.needs_rehash(&upgraded));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn needs_rehash(&self, stored: &PasswordHash) -> bool {
+        let Ok(parsed) = argon2::PasswordHash::new(stored.as_str()) else {
+            return true;
+        };
+        if parsed.algorithm.as_str() != Algorithm::Argon2id.as_str()
+            || parsed.version != Some(Version::V0x13.into())
+        {
+            return true;
+        }
+        let Ok(params) = Params::try_from(&parsed) else {
+            return true;
+        };
+        let output_len =
+            |params: &Params| params.output_len().unwrap_or(Params::DEFAULT_OUTPUT_LEN);
+        params.m_cost() != self.params.m_cost()
+            || params.t_cost() != self.params.t_cost()
+            || params.p_cost() != self.params.p_cost()
+            || output_len(&params) != output_len(&self.params)
+    }
+
     /// Whether `password` matches `stored`.
     ///
     /// With `stored` = `None` (unknown account, or no password set) it still runs a full hash
@@ -320,6 +370,40 @@ mod tests {
         assert!(hasher.verify("correct horse battery", Some(&reloaded)));
         assert!(PasswordHash::try_from("not a hash").is_err());
         assert!(!format!("{hash:?}").contains("argon2id"));
+        Ok(())
+    }
+
+    #[test]
+    fn hashes_under_other_parameters_need_a_rehash() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let current = hasher.hash("correct horse battery", &mut rng)?;
+        assert!(!hasher.needs_rehash(&current));
+        for params in [
+            PasswordParams::new(128, 1, 1)?,
+            PasswordParams::new(64, 2, 1)?,
+            PasswordParams::new(64, 1, 2)?,
+        ] {
+            let other = PasswordHasher::new(params, &mut rng)?;
+            let stored = other.hash("correct horse battery", &mut rng)?;
+            assert!(hasher.needs_rehash(&stored), "{params:?}");
+            assert!(!other.needs_rehash(&stored));
+        }
+        // Same parameters, other algorithm, version or output length.
+        let salt = "c29tZXNhbHRzb21lc2FsdA";
+        let hash32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        for phc in [
+            format!("$argon2i$v=19$m=64,t=1,p=1${salt}${hash32}"),
+            format!("$argon2id$v=16$m=64,t=1,p=1${salt}${hash32}"),
+            format!("$argon2id$m=64,t=1,p=1${salt}${hash32}"),
+            format!("$argon2id$v=19$m=64,t=1,p=1${salt}$AAAAAAAAAAAAAAAAAAAAAA"),
+            format!("$scrypt$ln=15,r=8,p=1${salt}${hash32}"),
+        ] {
+            let stored = PasswordHash::try_from(phc.as_str())?;
+            assert!(hasher.needs_rehash(&stored), "{phc}");
+        }
+        let same = PasswordHash::try_from(format!("$argon2id$v=19$m=64,t=1,p=1${salt}${hash32}"))?;
+        assert!(!hasher.needs_rehash(&same));
         Ok(())
     }
 
