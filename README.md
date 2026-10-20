@@ -61,8 +61,8 @@ async fn danger(_user: RecentAuth) -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let secret_key: [u8; 32] = load_secret_key();
-    let config = Config::new("owner@example.com", "https://home.example.com", secret_key)?;
+    let (secret_key, data_key): ([u8; 32], [u8; 32]) = load_keys();
+    let config = Config::new("owner@example.com", "https://home.example.com", secret_key, data_key)?;
     let store = SqliteStore::connect("sqlite://auth.db").await?;
     let auth = Latchkey::new(config, Arc::new(store), Arc::new(MyMailer)).await?;
 
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
-# fn load_secret_key() -> [u8; 32] { [1; 32] }
+# fn load_keys() -> ([u8; 32], [u8; 32]) { ([1; 32], [2; 32]) }
 ```
 
 If your app has its own state type, implement `axum::extract::FromRef<YourState> for Latchkey`
@@ -178,8 +178,8 @@ Known trade-offs:
   attacker who has already made 5 wrong guesses that the address exists.
 - Rate-limit counters and passkey ceremonies live in memory: they reset on restart and are not
   shared between several instances of the app.
-- TOTP secrets and passkey data are stored unencrypted in the database. Protect the database
-  file like a password store.
+- TOTP secrets and passkey data are encrypted with AES-256-GCM under `data_key`; anyone with
+  both the database and that key can read them. Keep the key out of the database's backups.
 
 ## What it does not do
 

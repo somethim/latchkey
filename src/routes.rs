@@ -606,7 +606,8 @@ async fn totp_enrol(State(latchkey): State<Latchkey>, session: AnySession) -> Re
     let AnySession { user, .. } = enrolling(&latchkey, session).await?;
     let secret = totp::new_secret();
     let enrolment = totp::enrolment(&secret, &latchkey.config().rp_name, &user.email)?;
-    latchkey.store().set_pending_totp(user.id, &secret).await?;
+    let sealed = latchkey.seal_totp(user.id, &secret)?;
+    latchkey.store().set_pending_totp(user.id, &sealed).await?;
     Ok(Json(json!({
         "secret": enrolment.secret_base32,
         "otpauth_url": enrolment.otpauth_url,
@@ -627,6 +628,7 @@ async fn totp_confirm(
         .await?
         .and_then(|record| record.pending_secret)
         .ok_or(Error::InvalidRequest("no_pending_totp"))?;
+    let pending = latchkey.open_totp(user.id, &pending)?;
     let step = totp::matched_step(&pending, &body.code, latchkey.now())
         .ok_or(Error::InvalidRequest("code_rejected"))?;
     if !latchkey.store().confirm_totp(user.id, step).await? {

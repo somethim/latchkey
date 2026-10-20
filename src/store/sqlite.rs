@@ -580,6 +580,41 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn all_totp(&self) -> Result<Vec<(Uuid, TotpRecord)>, StoreError> {
+        sqlx::query("SELECT user_id, secret, pending_secret, last_step FROM latchkey_totp")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db)?
+            .iter()
+            .map(|row| {
+                Ok((
+                    uuid(&get::<String>(row, "user_id")?)?,
+                    TotpRecord {
+                        secret: get(row, "secret")?,
+                        pending_secret: get(row, "pending_secret")?,
+                        last_step: get(row, "last_step")?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    async fn set_totp_secrets(
+        &self,
+        user: Uuid,
+        secret: Option<&[u8]>,
+        pending_secret: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE latchkey_totp SET secret = ?, pending_secret = ? WHERE user_id = ?")
+            .bind(secret)
+            .bind(pending_secret)
+            .bind(user.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(())
+    }
+
     async fn add_passkey(&self, passkey: &PasskeyRecord) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO latchkey_passkeys (id, user_id, credential_id, name, data, created_at, \
@@ -636,6 +671,29 @@ impl Store for SqliteStore {
             .await
             .map_err(db)?;
         Ok(done.rows_affected() == 1)
+    }
+
+    async fn all_passkeys(&self) -> Result<Vec<PasskeyRecord>, StoreError> {
+        sqlx::query(
+            "SELECT id, user_id, credential_id, name, data, created_at, last_used_at \
+             FROM latchkey_passkeys",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?
+        .iter()
+        .map(passkey_from)
+        .collect()
+    }
+
+    async fn set_passkey_data(&self, id: Uuid, data: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE latchkey_passkeys SET data = ? WHERE id = ?")
+            .bind(data)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(())
     }
 
     async fn replace_recovery_codes(

@@ -12,6 +12,7 @@ categories = ["authentication", "web-programming::http-server"]
 exclude = ["/.github"]
 
 [dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 argon2 = "0.6.0"
 async-trait = "0.1.89"
 axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }

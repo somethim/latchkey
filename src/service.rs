@@ -18,6 +18,7 @@ use crate::limiter::RateLimiter;
 use crate::mail::{Mail, MailKind, Mailer};
 use crate::password::{self, Hasher};
 use crate::recovery;
+use crate::seal::{self, Aad, DataKey, Stored};
 use crate::store::{
     NewAuditEvent, OneTimeToken, PasskeyRecord, Role, Session, Stage, Store, TokenKind, User,
 };
@@ -40,6 +41,7 @@ pub(crate) struct Inner {
     pub(crate) webauthn: Webauthn,
     pub(crate) ceremonies: Ceremonies,
     pub(crate) limiter: RateLimiter,
+    pub(crate) data_key: DataKey,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +89,7 @@ impl Latchkey {
             .and_then(|builder| builder.rp_name(&config.rp_name).build())
             .map_err(|_| Error::Config("rp_id does not match the origin"))?;
         let hasher = Hasher::new(config.password).await?;
+        let data_key = DataKey::new(&config.data_key);
         let latchkey = Self {
             inner: Arc::new(Inner {
                 config,
@@ -97,8 +100,10 @@ impl Latchkey {
                 webauthn,
                 ceremonies: Ceremonies::default(),
                 limiter: RateLimiter::default(),
+                data_key,
             }),
         };
+        check_sealed(&latchkey.inner.data_key, latchkey.inner.store.as_ref()).await?;
         latchkey.ensure_owner().await?;
         Ok(latchkey)
     }
@@ -150,6 +155,53 @@ impl Latchkey {
         )
         .await;
         Ok(())
+    }
+
+    /// Encrypts TOTP secrets and passkeys that an earlier version stored in plaintext. Run it
+    /// once, before [`Latchkey::new`], which refuses to start while plaintext rows remain.
+    /// Returns how many values it encrypted; values that are already encrypted are skipped,
+    /// so running it again is harmless.
+    pub async fn encrypt_plaintext_secrets(
+        config: &Config,
+        store: &dyn Store,
+    ) -> Result<usize, Error> {
+        config.validate()?;
+        let key = DataKey::new(&config.data_key);
+        let mut encrypted = 0;
+        for (user, record) in store.all_totp().await? {
+            let aad = Aad::Totp { user };
+            let mut changed = false;
+            let mut reseal = |value: Option<Vec<u8>>| -> Result<Option<Vec<u8>>, Error> {
+                match value {
+                    Some(plain) if seal::classify_bytes(&plain) == Stored::Plaintext => {
+                        changed = true;
+                        encrypted += 1;
+                        key.seal_bytes(&aad, &plain).map(Some)
+                    }
+                    other => Ok(other),
+                }
+            };
+            let secret = reseal(record.secret)?;
+            let pending = reseal(record.pending_secret)?;
+            if changed {
+                store
+                    .set_totp_secrets(user, secret.as_deref(), pending.as_deref())
+                    .await?;
+            }
+        }
+        for record in store.all_passkeys().await? {
+            if seal::classify_text(&record.data) == Stored::Plaintext {
+                let aad = Aad::Passkey {
+                    user: record.user_id,
+                    passkey: record.id,
+                };
+                let sealed = key.seal_text(&aad, &record.data)?;
+                store.set_passkey_data(record.id, &sealed).await?;
+                encrypted += 1;
+            }
+        }
+        check_sealed(&key, store).await?;
+        Ok(encrypted)
     }
 
     /// Deletes expired sessions and links; run it now and then.
@@ -437,7 +489,7 @@ impl Latchkey {
         client: &Client,
     ) -> Result<Option<SecondFactor>, Error> {
         if totp::looks_like_totp(code) {
-            let Some(secret) = self
+            let Some(stored) = self
                 .inner
                 .store
                 .totp(user.id)
@@ -446,6 +498,7 @@ impl Latchkey {
             else {
                 return Ok(None);
             };
+            let secret = self.open_totp(user.id, &stored)?;
             let Some(step) = totp::matched_step(&secret, code, self.now()) else {
                 return Ok(None);
             };
@@ -496,13 +549,39 @@ impl Latchkey {
         Ok(codes)
     }
 
-    fn passkeys_of(records: &[PasskeyRecord]) -> Vec<(Uuid, Passkey)> {
+    pub(crate) fn seal_totp(&self, user: Uuid, secret: &[u8]) -> Result<Vec<u8>, Error> {
+        self.inner.data_key.seal_bytes(&Aad::Totp { user }, secret)
+    }
+
+    pub(crate) fn open_totp(&self, user: Uuid, stored: &[u8]) -> Result<Vec<u8>, Error> {
+        self.inner
+            .data_key
+            .open_bytes(&Aad::Totp { user }, stored)
+            .ok_or_else(|| Error::Internal("a TOTP secret does not decrypt".into()))
+    }
+
+    fn seal_passkey(&self, user: Uuid, id: Uuid, passkey: &Passkey) -> Result<String, Error> {
+        let json = serde_json::to_string(passkey).map_err(Error::internal)?;
+        self.inner
+            .data_key
+            .seal_text(&Aad::Passkey { user, passkey: id }, &json)
+    }
+
+    fn passkeys_of(&self, records: &[PasskeyRecord]) -> Result<Vec<(Uuid, Passkey)>, Error> {
         records
             .iter()
-            .filter_map(|record| {
-                serde_json::from_str::<Passkey>(&record.data)
-                    .ok()
-                    .map(|passkey| (record.id, passkey))
+            .map(|record| {
+                let aad = Aad::Passkey {
+                    user: record.user_id,
+                    passkey: record.id,
+                };
+                let json = self
+                    .inner
+                    .data_key
+                    .open_text(&aad, &record.data)
+                    .ok_or_else(|| Error::Internal("a passkey does not decrypt".into()))?;
+                let passkey = serde_json::from_str::<Passkey>(&json).map_err(Error::internal)?;
+                Ok((record.id, passkey))
             })
             .collect()
     }
@@ -514,7 +593,8 @@ impl Latchkey {
         name: String,
     ) -> Result<(Uuid, CreationChallengeResponse), Error> {
         let existing = self.inner.store.passkeys_for(user.id).await?;
-        let exclude = Self::passkeys_of(&existing)
+        let exclude = self
+            .passkeys_of(&existing)?
             .into_iter()
             .map(|(_, passkey)| passkey.cred_id().clone())
             .collect::<Vec<_>>();
@@ -560,12 +640,13 @@ impl Latchkey {
             .webauthn
             .finish_passkey_registration(credential, &state)
             .map_err(|_| Error::InvalidRequest("passkey_rejected"))?;
+        let id = Uuid::new_v4();
         let record = PasskeyRecord {
-            id: Uuid::new_v4(),
+            id,
             user_id: user.id,
             credential_id: passkey.cred_id().to_vec(),
             name,
-            data: serde_json::to_string(&passkey).map_err(Error::internal)?,
+            data: self.seal_passkey(user.id, id, &passkey)?,
             created_at: self.now(),
             last_used_at: None,
         };
@@ -591,7 +672,8 @@ impl Latchkey {
         session: &Session,
     ) -> Result<(Uuid, RequestChallengeResponse), Error> {
         let records = self.inner.store.passkeys_for(user.id).await?;
-        let passkeys: Vec<Passkey> = Self::passkeys_of(&records)
+        let passkeys: Vec<Passkey> = self
+            .passkeys_of(&records)?
             .into_iter()
             .map(|(_, passkey)| passkey)
             .collect();
@@ -648,9 +730,9 @@ impl Latchkey {
         result: &webauthn_rs::prelude::AuthenticationResult,
     ) -> Result<bool, Error> {
         let records = self.inner.store.passkeys_for(user).await?;
-        for (id, mut passkey) in Self::passkeys_of(&records) {
+        for (id, mut passkey) in self.passkeys_of(&records)? {
             if passkey.update_credential(result).is_some() {
-                let data = serde_json::to_string(&passkey).map_err(Error::internal)?;
+                let data = self.seal_passkey(user, id, &passkey)?;
                 self.inner
                     .store
                     .update_passkey(id, &data, self.now())
@@ -701,7 +783,8 @@ impl Latchkey {
             return Ok(None);
         };
         let records = self.inner.store.passkeys_for(user.id).await?;
-        let keys: Vec<DiscoverableKey> = Self::passkeys_of(&records)
+        let keys: Vec<DiscoverableKey> = self
+            .passkeys_of(&records)?
             .iter()
             .map(|(_, passkey)| DiscoverableKey::from(passkey))
             .collect();
@@ -730,4 +813,39 @@ impl Latchkey {
             .map(|at| at.saturating_add(self.inner.config.step_up_window))
             .filter(|until| *until > self.now())
     }
+}
+
+/// Refuses to run on plaintext factors or on factors sealed under another data key.
+async fn check_sealed(key: &DataKey, store: &dyn Store) -> Result<(), Error> {
+    const PLAINTEXT: Error = Error::Config(
+        "the store holds unencrypted TOTP secrets or passkeys; run \
+         Latchkey::encrypt_plaintext_secrets once before starting",
+    );
+    const WRONG_KEY: Error = Error::Config(
+        "stored TOTP secrets or passkeys do not decrypt with the configured data key",
+    );
+    for (user, record) in store.all_totp().await? {
+        let aad = Aad::Totp { user };
+        for value in [record.secret, record.pending_secret].into_iter().flatten() {
+            if seal::classify_bytes(&value) == Stored::Plaintext {
+                return Err(PLAINTEXT);
+            }
+            if key.open_bytes(&aad, &value).is_none() {
+                return Err(WRONG_KEY);
+            }
+        }
+    }
+    for record in store.all_passkeys().await? {
+        if seal::classify_text(&record.data) == Stored::Plaintext {
+            return Err(PLAINTEXT);
+        }
+        let aad = Aad::Passkey {
+            user: record.user_id,
+            passkey: record.id,
+        };
+        if key.open_text(&aad, &record.data).is_none() {
+            return Err(WRONG_KEY);
+        }
+    }
+    Ok(())
 }

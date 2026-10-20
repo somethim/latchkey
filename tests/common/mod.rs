@@ -33,7 +33,7 @@ pub struct App {
 }
 
 pub fn config() -> Config {
-    let mut config = Config::new(OWNER, ORIGIN, [42; 32]).unwrap();
+    let mut config = Config::new(OWNER, ORIGIN, [42; 32], [43; 32]).unwrap();
     config.password = PasswordParams {
         memory_kib: 64,
         iterations: 1,
@@ -56,7 +56,10 @@ impl App {
     }
 
     pub async fn with_config(config: Config) -> Self {
-        let store = SqliteStore::in_memory().await.unwrap();
+        Self::with_store(config, SqliteStore::in_memory().await.unwrap()).await
+    }
+
+    pub async fn with_store(config: Config, store: SqliteStore) -> Self {
         let mailer = Arc::new(TestMailer::new());
         let clock = Arc::new(ManualClock::new(
             OffsetDateTime::from_unix_timestamp(1_900_000_000).unwrap(),

@@ -71,7 +71,7 @@ impl Default for RateLimits {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// The account created on first start; setup links only ever go to this address.
     pub owner_email: String,
@@ -98,12 +98,20 @@ pub struct Config {
     pub password: PasswordParams,
     /// Keys the HMAC that pseudonymises IP addresses in sessions and the audit log.
     pub secret_key: [u8; 32],
+    /// AES-256-GCM key for TOTP secrets and passkey data at rest; must differ from
+    /// `secret_key`. Changing it makes stored factors unreadable.
+    pub data_key: [u8; 32],
     /// Take the client IP from the last `X-Forwarded-For` entry instead of the socket.
     pub trust_forwarded_for: bool,
 }
 
 impl Config {
-    pub fn new(owner_email: &str, origin: &str, secret_key: [u8; 32]) -> Result<Self, Error> {
+    pub fn new(
+        owner_email: &str,
+        origin: &str,
+        secret_key: [u8; 32],
+        data_key: [u8; 32],
+    ) -> Result<Self, Error> {
         let origin = Url::parse(origin).map_err(|_| Error::Config("origin is not a URL"))?;
         let rp_id = origin
             .host_str()
@@ -136,6 +144,7 @@ impl Config {
             rate_limits: RateLimits::default(),
             password: PasswordParams::default(),
             secret_key,
+            data_key,
             trust_forwarded_for: false,
         })
     }
@@ -150,11 +159,30 @@ impl Config {
         if self.secret_key == [0u8; 32] {
             return Err(Error::Config("secret key is all zeroes"));
         }
+        if self.data_key == [0u8; 32] {
+            return Err(Error::Config("data key is all zeroes"));
+        }
+        if self.data_key == self.secret_key {
+            return Err(Error::Config("data key must differ from the secret key"));
+        }
         Ok(())
     }
 
     pub(crate) fn origin_string(&self) -> String {
         self.origin.origin().ascii_serialization()
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("owner_email", &self.owner_email)
+            .field("origin", &self.origin.as_str())
+            .field("rp_id", &self.rp_id)
+            .field("cookie_name", &self.cookie_name)
+            .field("secret_key", &"<redacted>")
+            .field("data_key", &"<redacted>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -200,11 +228,49 @@ mod tests {
 
     #[test]
     fn config_rejects_bad_cookie_and_plain_http() {
-        let mut config = Config::new("o@example.com", "https://home.example.com", [7; 32]).unwrap();
+        let mut config = Config::new(
+            "o@example.com",
+            "https://home.example.com",
+            [7; 32],
+            [8; 32],
+        )
+        .unwrap();
         assert!(config.validate().is_ok());
         config.cookie_name = "session".into();
         assert!(config.validate().is_err());
-        let config = Config::new("o@example.com", "http://home.example.com", [7; 32]).unwrap();
+        let config =
+            Config::new("o@example.com", "http://home.example.com", [7; 32], [8; 32]).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_needs_a_separate_nonzero_data_key() {
+        let new = |data_key| {
+            Config::new(
+                "o@example.com",
+                "https://home.example.com",
+                [7; 32],
+                data_key,
+            )
+            .unwrap()
+        };
+        assert!(new([0; 32]).validate().is_err());
+        assert!(new([7; 32]).validate().is_err());
+        assert!(new([8; 32]).validate().is_ok());
+    }
+
+    #[test]
+    fn debug_output_hides_the_keys() {
+        let config = Config::new(
+            "o@example.com",
+            "https://home.example.com",
+            [7; 32],
+            [8; 32],
+        )
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("7, 7"));
+        assert!(!debug.contains("8, 8"));
     }
 }

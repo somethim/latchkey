@@ -13,6 +13,7 @@ mod mail;
 mod password;
 mod recovery;
 mod routes;
+mod seal;
 mod service;
 pub mod store;
 mod totp;

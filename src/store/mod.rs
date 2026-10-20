@@ -124,6 +124,7 @@ pub struct OneTimeToken {
     pub expires_at: OffsetDateTime,
 }
 
+/// Secrets are sealed with the data key and opaque to the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TotpRecord {
     pub secret: Option<Vec<u8>>,
@@ -137,7 +138,8 @@ pub struct PasskeyRecord {
     pub user_id: Uuid,
     pub credential_id: Vec<u8>,
     pub name: String,
-    /// The serialised `webauthn_rs::prelude::Passkey`.
+    /// The serialised `webauthn_rs::prelude::Passkey`, sealed with the data key. Opaque to the
+    /// store.
     pub data: String,
     pub created_at: OffsetDateTime,
     pub last_used_at: Option<OffsetDateTime>,
@@ -225,6 +227,15 @@ pub trait Store: Send + Sync + 'static {
     /// Atomic: records `step` only if it is newer than the last accepted one.
     async fn use_totp_step(&self, user: Uuid, step: i64) -> Result<bool, StoreError>;
     async fn delete_totp(&self, user: Uuid) -> Result<(), StoreError>;
+    /// Every TOTP row, for the start-up check and the plaintext migration.
+    async fn all_totp(&self) -> Result<Vec<(Uuid, TotpRecord)>, StoreError>;
+    /// Overwrites both secrets as given; leaves `last_step` alone.
+    async fn set_totp_secrets(
+        &self,
+        user: Uuid,
+        secret: Option<&[u8]>,
+        pending_secret: Option<&[u8]>,
+    ) -> Result<(), StoreError>;
 
     async fn add_passkey(&self, passkey: &PasskeyRecord) -> Result<(), StoreError>;
     async fn passkeys_for(&self, user: Uuid) -> Result<Vec<PasskeyRecord>, StoreError>;
@@ -235,6 +246,10 @@ pub trait Store: Send + Sync + 'static {
         used_at: OffsetDateTime,
     ) -> Result<(), StoreError>;
     async fn delete_passkey(&self, user: Uuid, id: Uuid) -> Result<bool, StoreError>;
+    /// Every passkey row, for the start-up check and the plaintext migration.
+    async fn all_passkeys(&self) -> Result<Vec<PasskeyRecord>, StoreError>;
+    /// Overwrites `data` without touching `last_used_at`.
+    async fn set_passkey_data(&self, id: Uuid, data: &str) -> Result<(), StoreError>;
 
     async fn replace_recovery_codes(
         &self,

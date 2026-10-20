@@ -38,8 +38,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let owner = std::env::var("OWNER_EMAIL").unwrap_or_else(|_| "owner@example.com".into());
-    let config = Config::new(&owner, "http://localhost:3000", rand::random())?;
-    let store = SqliteStore::connect("sqlite://latchkey-example.db").await?;
+    // Fresh keys every run, so the database lives in memory too: factors sealed with one data
+    // key do not open with the next.
+    let config = Config::new(
+        &owner,
+        "http://localhost:3000",
+        rand::random(),
+        rand::random(),
+    )?;
+    let store = SqliteStore::in_memory().await?;
     let auth = Latchkey::new(config, Arc::new(store), Arc::new(PrintMailer)).await?;
 
     let app = Router::new()
