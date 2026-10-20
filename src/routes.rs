@@ -356,6 +356,7 @@ async fn sign_in_password(
 ) -> Result<Response> {
     latchkey.limit_ip(&client)?;
     latchkey.limit_account(body.email.trim().to_lowercase().as_str())?;
+    latchkey.limit_wrong_passwords(&body.email)?;
     let user = latchkey.find_active(&body.email).await?;
     if let Some(user) = &user {
         latchkey.check_lock(user)?;
@@ -363,6 +364,9 @@ async fn sign_in_password(
     let matched = latchkey
         .verify_password(user.as_ref(), &body.password)
         .await?;
+    if !matched {
+        latchkey.record_wrong_password(&body.email);
+    }
     let Some(user) = user else {
         return Err(Error::SignInFailed);
     };
@@ -550,10 +554,12 @@ async fn step_up_password(
     latchkey.limit_ip(&client)?;
     latchkey.limit_account(&current.user.id.to_string())?;
     latchkey.check_lock(&current.user)?;
+    latchkey.limit_wrong_passwords(&current.user.email)?;
     if !latchkey
         .verify_password(Some(&current.user), &body.password)
         .await?
     {
+        latchkey.record_wrong_password(&current.user.email);
         return Err(latchkey
             .fail(&current.user, "step_up_password", &client)
             .await);

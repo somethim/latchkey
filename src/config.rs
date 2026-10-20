@@ -55,11 +55,16 @@ impl LockoutPolicy {
     }
 }
 
-/// Fixed one-minute windows.
+/// The per-minute limits use fixed one-minute windows; the wrong-password limit is a sliding
+/// window and applies to unknown addresses the same way, so it does not reveal which exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimits {
     pub per_ip_per_minute: u32,
     pub per_account_per_minute: u32,
+    /// Wrong passwords allowed per account within `wrong_password_window`, independent of the
+    /// lockout and not reset by a successful sign-in; 0 turns it off.
+    pub wrong_passwords_per_account: u32,
+    pub wrong_password_window: Duration,
 }
 
 impl Default for RateLimits {
@@ -67,6 +72,8 @@ impl Default for RateLimits {
         Self {
             per_ip_per_minute: 30,
             per_account_per_minute: 10,
+            wrong_passwords_per_account: 10,
+            wrong_password_window: Duration::minutes(15),
         }
     }
 }

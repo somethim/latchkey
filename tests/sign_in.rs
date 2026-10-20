@@ -194,6 +194,7 @@ async fn per_ip_rate_limit() {
     config.rate_limits = RateLimits {
         per_ip_per_minute: 3,
         per_account_per_minute: 100,
+        ..RateLimits::default()
     };
     let app = App::with_config(config).await;
     let mut client = app.client();
@@ -214,6 +215,7 @@ async fn per_account_rate_limit() {
     config.rate_limits = RateLimits {
         per_ip_per_minute: 100,
         per_account_per_minute: 2,
+        ..RateLimits::default()
     };
     let app = App::with_config(config).await;
     let mut client = app.client();

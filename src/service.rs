@@ -14,7 +14,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::config::{Config, normalize_email};
 use crate::crypto::{self, hmac_hex, issue_token};
 use crate::error::Error;
-use crate::limiter::RateLimiter;
+use crate::limiter::{FailureLog, RateLimiter};
 use crate::mail::{Mail, MailKind, Mailer, SignInDetails};
 use crate::password::{self, Hasher};
 use crate::recovery;
@@ -41,6 +41,7 @@ pub(crate) struct Inner {
     pub(crate) webauthn: Webauthn,
     pub(crate) ceremonies: Ceremonies,
     pub(crate) limiter: RateLimiter,
+    pub(crate) wrong_passwords: FailureLog,
     pub(crate) data_key: DataKey,
 }
 
@@ -104,6 +105,7 @@ impl Latchkey {
                 webauthn,
                 ceremonies: Ceremonies::default(),
                 limiter: RateLimiter::default(),
+                wrong_passwords: FailureLog::default(),
                 data_key,
             }),
         };
@@ -262,6 +264,31 @@ impl Latchkey {
             Some(retry_after_secs) => Err(Error::TooManyAttempts { retry_after_secs }),
             None => Ok(()),
         }
+    }
+
+    /// Refuses before the password is checked once the account (known or not) has had too
+    /// many wrong passwords in the window.
+    pub(crate) fn limit_wrong_passwords(&self, account: &str) -> Result<(), Error> {
+        let limits = self.inner.config.rate_limits;
+        match self.inner.wrong_passwords.blocked(
+            &password_key(account),
+            limits.wrong_passwords_per_account,
+            limits.wrong_password_window,
+            self.now(),
+        ) {
+            Some(retry_after_secs) => Err(Error::TooManyAttempts { retry_after_secs }),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn record_wrong_password(&self, account: &str) {
+        let limits = self.inner.config.rate_limits;
+        self.inner.wrong_passwords.record(
+            &password_key(account),
+            limits.wrong_passwords_per_account,
+            limits.wrong_password_window,
+            self.now(),
+        );
     }
 
     pub(crate) fn check_lock(&self, user: &User) -> Result<(), Error> {
@@ -914,4 +941,8 @@ async fn check_sealed(key: &DataKey, store: &dyn Store) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn password_key(account: &str) -> String {
+    normalize_email(account).unwrap_or_else(|| account.trim().to_lowercase())
 }
