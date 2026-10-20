@@ -82,10 +82,17 @@ pub struct Config {
     pub rp_name: String,
     /// Must start with `__Host-`.
     pub cookie_name: String,
+    /// Long-lived cookie that recognises a browser, so a sign-in from an unknown one is mailed
+    /// to the account. Must start with `__Host-`.
+    pub device_cookie_name: String,
+    /// How long a device stays known after its last sign-in.
+    pub device_ttl: Duration,
     /// Front-end pages that receive `?token=` from the emailed links.
     pub setup_url: Url,
     pub sign_in_link_url: Url,
     pub invite_url: Url,
+    /// Linked from the new-device mail, for reviewing sessions.
+    pub sessions_url: Url,
     pub session_ttl: Duration,
     pub pending_ttl: Duration,
     pub setup_ttl: Duration,
@@ -129,9 +136,12 @@ impl Config {
             rp_name: rp_id.clone(),
             rp_id,
             cookie_name: "__Host-latchkey".to_owned(),
+            device_cookie_name: "__Host-latchkey_device".to_owned(),
+            device_ttl: Duration::days(400),
             setup_url: join("/setup")?,
             sign_in_link_url: join("/sign-in/link")?,
             invite_url: join("/invite")?,
+            sessions_url: join("/settings/sessions")?,
             origin,
             session_ttl: Duration::days(30),
             pending_ttl: Duration::minutes(10),
@@ -152,6 +162,14 @@ impl Config {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if !self.cookie_name.starts_with("__Host-") {
             return Err(Error::Config("cookie name must start with __Host-"));
+        }
+        if !self.device_cookie_name.starts_with("__Host-") {
+            return Err(Error::Config("device cookie name must start with __Host-"));
+        }
+        if self.device_cookie_name == self.cookie_name {
+            return Err(Error::Config(
+                "device cookie name must differ from the cookie name",
+            ));
         }
         if self.origin.scheme() != "https" && self.origin.host_str() != Some("localhost") {
             return Err(Error::Config("origin must be https"));

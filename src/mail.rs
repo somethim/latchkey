@@ -12,6 +12,8 @@ pub enum MailKind {
     Setup,
     SignInLink,
     Invite,
+    /// A sign-in completed on a browser the account had not used before.
+    NewDevice,
 }
 
 /// What to send; wording and layout are up to the app's [`Mailer`].
@@ -19,8 +21,31 @@ pub enum MailKind {
 pub struct Mail {
     pub kind: MailKind,
     pub to: String,
+    /// The page that redeems the token, or for [`MailKind::NewDevice`] the sessions page.
     pub link: Url,
-    pub expires_at: OffsetDateTime,
+    /// When the link stops working; `None` for notifications.
+    pub expires_at: Option<OffsetDateTime>,
+    /// Set for [`MailKind::NewDevice`].
+    pub sign_in: Option<SignInDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInDetails {
+    pub at: OffsetDateTime,
+    /// Such as `password+totp`, `passkey` or `email_link`.
+    pub method: String,
+    pub user_agent: Option<String>,
+}
+
+fn rfc3339(at: OffsetDateTime) -> String {
+    at.replace_nanosecond(0)
+        .unwrap_or(at)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+fn printable(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_control()).collect()
 }
 
 impl Mail {
@@ -29,6 +54,7 @@ impl Mail {
             MailKind::Setup => "Set up your sign-in",
             MailKind::SignInLink => "Your sign-in link",
             MailKind::Invite => "You have been invited",
+            MailKind::NewDevice => "New sign-in to your account",
         }
     }
 
@@ -37,15 +63,35 @@ impl Mail {
             MailKind::Setup => "set up your sign-in",
             MailKind::SignInLink => "sign in",
             MailKind::Invite => "accept the invitation and set up your sign-in",
+            MailKind::NewDevice => return self.new_device_text(),
         };
         format!(
             "Open this link to {action}:\n\n{}\n\nIt works once and expires at {}. If you did not ask for it, ignore this email.\n",
             self.link,
-            self.expires_at
-                .replace_nanosecond(0)
-                .unwrap_or(self.expires_at)
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default(),
+            self.expires_at.map(rfc3339).unwrap_or_default(),
+        )
+    }
+
+    fn new_device_text(&self) -> String {
+        let details = self
+            .sign_in
+            .as_ref()
+            .map(|details| {
+                format!(
+                    "When: {}\nMethod: {}\nBrowser: {}\n\n",
+                    rfc3339(details.at),
+                    printable(&details.method),
+                    details
+                        .user_agent
+                        .as_deref()
+                        .map(printable)
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "Your account was just signed in to from a browser it had not used before.\n\n{details}If this was you, there is nothing to do. If not, sign out that session and change your password:\n\n{}\n",
+            self.link,
         )
     }
 }
@@ -110,5 +156,31 @@ impl Mailer for TestMailer {
         }
         self.notify.notify_waiters();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_device_text_names_the_sign_in_and_strips_control_characters() {
+        let mail = Mail {
+            kind: MailKind::NewDevice,
+            to: "o@example.com".into(),
+            link: Url::parse("https://home.example.com/settings/sessions").unwrap(),
+            expires_at: None,
+            sign_in: Some(SignInDetails {
+                at: OffsetDateTime::from_unix_timestamp(1_900_000_000).unwrap(),
+                method: "passkey".into(),
+                user_agent: Some("Evil\r\nBcc: x@y".into()),
+            }),
+        };
+        let text = mail.text();
+        assert!(text.contains("Method: passkey"));
+        assert!(text.contains("Browser: EvilBcc: x@y\n"));
+        assert!(text.contains("https://home.example.com/settings/sessions"));
+        assert!(text.contains("2030-03-17T17:46:40Z"));
     }
 }

@@ -265,6 +265,16 @@ pub trait Store: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
     async fn unused_recovery_codes(&self, user: Uuid) -> Result<u32, StoreError>;
 
+    /// Atomic: records that `user` signed in on the device whose cookie hashes to `hash`, and
+    /// returns true when that pairing had not been seen before.
+    async fn remember_device(
+        &self,
+        user: Uuid,
+        hash: &[u8],
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+    async fn purge_devices(&self, seen_before: OffsetDateTime) -> Result<(), StoreError>;
+
     async fn append_audit(&self, event: &NewAuditEvent) -> Result<(), StoreError>;
     async fn audit(&self, user: Option<Uuid>, limit: u32) -> Result<Vec<AuditEvent>, StoreError>;
 

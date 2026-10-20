@@ -50,7 +50,19 @@ pub(crate) fn set_cookie(
     token: &str,
     max_age_secs: i64,
 ) -> Option<HeaderValue> {
-    let name = &latchkey.config().cookie_name;
+    cookie_header(&latchkey.config().cookie_name, token, max_age_secs)
+}
+
+pub(crate) fn set_device_cookie(latchkey: &Latchkey, token: &str) -> Option<HeaderValue> {
+    let config = latchkey.config();
+    cookie_header(
+        &config.device_cookie_name,
+        token,
+        config.device_ttl.whole_seconds(),
+    )
+}
+
+fn cookie_header(name: &str, token: &str, max_age_secs: i64) -> Option<HeaderValue> {
     HeaderValue::from_str(&format!(
         "{name}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly; Secure; SameSite=Lax"
     ))
@@ -85,6 +97,7 @@ pub(crate) fn client_from(latchkey: &Latchkey, parts: &Parts) -> Client {
     Client {
         ip: forwarded.or(socket),
         user_agent,
+        device: session_cookie(&parts.headers, &latchkey.config().device_cookie_name),
     }
 }
 

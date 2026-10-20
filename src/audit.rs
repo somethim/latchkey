@@ -19,6 +19,7 @@ pub enum AuditKind {
     RecoveryCodesIssued,
     RecoveryCodeUsed,
     OwnerReset,
+    NewDevice,
 }
 
 impl AuditKind {
@@ -42,6 +43,7 @@ impl AuditKind {
             AuditKind::RecoveryCodesIssued => "recovery_codes_issued",
             AuditKind::RecoveryCodeUsed => "recovery_code_used",
             AuditKind::OwnerReset => "owner_reset",
+            AuditKind::NewDevice => "new_device",
         }
     }
 }

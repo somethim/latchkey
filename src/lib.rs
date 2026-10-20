@@ -23,7 +23,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{Config, LockoutPolicy, PasswordParams, RateLimits};
 pub use error::Error;
 pub use extract::{CSRF_HEADER, CurrentUser, RecentAuth};
-pub use mail::{Mail, MailError, MailKind, Mailer, TestMailer};
+pub use mail::{Mail, MailError, MailKind, Mailer, SignInDetails, TestMailer};
 pub use service::Latchkey;
 pub use store::{Role, SqliteStore, Store};
 

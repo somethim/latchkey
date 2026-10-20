@@ -11,7 +11,10 @@ use super::{
     StoreError, TokenKind, TotpRecord, User,
 };
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("migrations/0001_initial.sql")),
+    (2, include_str!("migrations/0002_devices.sql")),
+];
 
 /// SQLite storage. Tables are prefixed `latchkey_` and migrations are tracked in
 /// `latchkey_migrations`, so the app's own migrations can share the database.
@@ -349,6 +352,7 @@ impl Store for SqliteStore {
             "DELETE FROM latchkey_recovery_codes WHERE user_id = ?",
             "DELETE FROM latchkey_sessions WHERE user_id = ?",
             "DELETE FROM latchkey_tokens WHERE user_id = ?",
+            "DELETE FROM latchkey_devices WHERE user_id = ?",
         ] {
             sqlx::query(sql)
                 .bind(&id)
@@ -747,6 +751,45 @@ impl Store for SqliteStore {
         .await
         .map_err(db)?;
         Ok(u32::try_from(count).unwrap_or(0))
+    }
+
+    async fn remember_device(
+        &self,
+        user: Uuid,
+        hash: &[u8],
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let inserted = sqlx::query(
+            "INSERT INTO latchkey_devices (user_id, hash, created_at, last_seen_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT (user_id, hash) DO NOTHING",
+        )
+        .bind(user.to_string())
+        .bind(hash)
+        .bind(ts(now))
+        .bind(ts(now))
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if inserted.rows_affected() == 1 {
+            return Ok(true);
+        }
+        sqlx::query("UPDATE latchkey_devices SET last_seen_at = ? WHERE user_id = ? AND hash = ?")
+            .bind(ts(now))
+            .bind(user.to_string())
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(false)
+    }
+
+    async fn purge_devices(&self, seen_before: OffsetDateTime) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM latchkey_devices WHERE last_seen_at <= ?")
+            .bind(ts(seen_before))
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        Ok(())
     }
 
     async fn append_audit(&self, event: &NewAuditEvent) -> Result<(), StoreError> {

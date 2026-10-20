@@ -15,7 +15,9 @@ use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 use crate::audit::AuditKind;
 use crate::config::normalize_email;
 use crate::error::Error;
-use crate::extract::{AnySession, Body, CurrentUser, RecentAuth, is_unsafe, origin_ok, set_cookie};
+use crate::extract::{
+    AnySession, Body, CurrentUser, RecentAuth, is_unsafe, origin_ok, set_cookie, set_device_cookie,
+};
 use crate::service::{Client, Issued, Latchkey, SecondFactor};
 use crate::store::{Role, Stage, TokenKind, User};
 use crate::totp;
@@ -110,7 +112,14 @@ fn with_session(latchkey: &Latchkey, issued: &Issued, mut body: Value) -> Respon
     let max_age = (issued.session.expires_at - issued.session.created_at).whole_seconds();
     let mut headers = HeaderMap::new();
     if let Some(cookie) = set_cookie(latchkey, &issued.token, max_age) {
-        headers.insert(header::SET_COOKIE, cookie);
+        headers.append(header::SET_COOKIE, cookie);
+    }
+    if let Some(cookie) = issued
+        .device_token
+        .as_deref()
+        .and_then(|token| set_device_cookie(latchkey, token))
+    {
+        headers.append(header::SET_COOKIE, cookie);
     }
     (headers, Json(body)).into_response()
 }

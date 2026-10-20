@@ -188,7 +188,7 @@ async fn file_database_migrates_once_and_reopens() {
         .fetch_one(store.pool())
         .await
         .unwrap();
-    assert_eq!(applied, 1);
+    assert_eq!(applied, 2);
     store.pool().close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }

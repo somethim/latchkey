@@ -84,8 +84,10 @@ impl App {
         Client {
             router: self.router.clone(),
             cookie: None,
+            device: None,
             csrf: None,
             forwarded_for: None,
+            user_agent: None,
         }
     }
 
@@ -129,7 +131,18 @@ impl App {
 pub struct Response {
     pub status: StatusCode,
     pub body: Value,
+    /// The session cookie's `Set-Cookie` header.
     pub set_cookie: Option<String>,
+    pub set_device_cookie: Option<String>,
+}
+
+fn cookie_value(header: &str) -> String {
+    header
+        .split(';')
+        .next()
+        .and_then(|pair| pair.split_once('='))
+        .map(|(_, value)| value.to_owned())
+        .unwrap()
 }
 
 impl Response {
@@ -142,8 +155,10 @@ impl Response {
 pub struct Client {
     router: Router,
     pub cookie: Option<String>,
+    pub device: Option<String>,
     pub csrf: Option<String>,
     pub forwarded_for: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 pub struct Raw {
@@ -182,8 +197,18 @@ impl Client {
         if let Some(ip) = &self.forwarded_for {
             request = request.header("x-forwarded-for", ip);
         }
+        if let Some(agent) = &self.user_agent {
+            request = request.header(header::USER_AGENT, agent);
+        }
+        let mut cookies = Vec::new();
         if let Some(cookie) = &self.cookie {
-            request = request.header(header::COOKIE, format!("__Host-latchkey={cookie}"));
+            cookies.push(format!("__Host-latchkey={cookie}"));
+        }
+        if let Some(device) = &self.device {
+            cookies.push(format!("__Host-latchkey_device={device}"));
+        }
+        if !cookies.is_empty() {
+            request = request.header(header::COOKIE, cookies.join("; "));
         }
         let request = match body {
             Some(body) => request
@@ -194,18 +219,26 @@ impl Client {
         };
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
-        let set_cookie = response
+        let set_cookies: Vec<String> = response
             .headers()
-            .get(header::SET_COOKIE)
-            .map(|value| value.to_str().unwrap().to_owned());
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        let set_cookie = set_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("__Host-latchkey="))
+            .cloned();
+        let set_device_cookie = set_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("__Host-latchkey_device="))
+            .cloned();
         if let Some(cookie) = &set_cookie {
-            let value = cookie
-                .split(';')
-                .next()
-                .and_then(|pair| pair.split_once('='))
-                .map(|(_, value)| value.to_owned())
-                .unwrap();
+            let value = cookie_value(cookie);
             self.cookie = (!value.is_empty()).then_some(value);
+        }
+        if let Some(cookie) = &set_device_cookie {
+            self.device = Some(cookie_value(cookie));
         }
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body: Value = if bytes.is_empty() {
@@ -221,6 +254,7 @@ impl Client {
             status,
             body,
             set_cookie,
+            set_device_cookie,
         }
     }
 

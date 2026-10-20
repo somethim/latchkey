@@ -15,7 +15,7 @@ use crate::config::{Config, normalize_email};
 use crate::crypto::{self, hmac_hex, issue_token};
 use crate::error::Error;
 use crate::limiter::RateLimiter;
-use crate::mail::{Mail, MailKind, Mailer};
+use crate::mail::{Mail, MailKind, Mailer, SignInDetails};
 use crate::password::{self, Hasher};
 use crate::recovery;
 use crate::seal::{self, Aad, DataKey, Stored};
@@ -48,11 +48,15 @@ pub(crate) struct Inner {
 pub(crate) struct Client {
     pub(crate) ip: Option<String>,
     pub(crate) user_agent: Option<String>,
+    /// The device cookie as presented, unchecked.
+    pub(crate) device: Option<String>,
 }
 
 pub(crate) struct Issued {
     pub(crate) token: String,
     pub(crate) session: Session,
+    /// Set (again) on every completed sign-in, so a known device keeps its cookie.
+    pub(crate) device_token: Option<String>,
 }
 
 pub(crate) enum SecondFactor {
@@ -204,9 +208,16 @@ impl Latchkey {
         Ok(encrypted)
     }
 
-    /// Deletes expired sessions and links; run it now and then.
+    /// Deletes expired sessions and links, and devices unused for `device_ttl`; run it now
+    /// and then.
     pub async fn purge_expired(&self) -> Result<(), Error> {
-        Ok(self.inner.store.purge_expired(self.now()).await?)
+        let now = self.now();
+        self.inner.store.purge_expired(now).await?;
+        self.inner
+            .store
+            .purge_devices(now.saturating_sub(self.inner.config.device_ttl))
+            .await?;
+        Ok(())
     }
 
     pub(crate) fn ip_tag(&self, client: &Client) -> Option<String> {
@@ -338,6 +349,7 @@ impl Latchkey {
         Ok(Issued {
             token: issued.token,
             session,
+            device_token: None,
         })
     }
 
@@ -349,7 +361,7 @@ impl Latchkey {
         replaces: Option<&Session>,
     ) -> Result<Issued, Error> {
         self.inner.store.clear_failures(user.id).await?;
-        let issued = self
+        let mut issued = self
             .start_session(user, Stage::Full, Some(method), client, replaces)
             .await?;
         self.audit(
@@ -359,7 +371,66 @@ impl Latchkey {
             client,
         )
         .await;
+        issued.device_token = Some(self.recognise_device(user, method, client).await?);
         Ok(issued)
+    }
+
+    /// Returns the device token to (re)set. The first sign-in at setup only records the device;
+    /// any later sign-in on a device unknown for this account mails the account.
+    async fn recognise_device(
+        &self,
+        user: &User,
+        method: &str,
+        client: &Client,
+    ) -> Result<String, Error> {
+        let presented = client.device.as_deref().and_then(|token| {
+            crypto::token_hash(token).map(|hash| (token.trim().to_owned(), hash))
+        });
+        let (token, hash) = match presented {
+            Some(known) => known,
+            None => {
+                let issued = issue_token();
+                (issued.token, issued.hash)
+            }
+        };
+        let now = self.now();
+        if !self
+            .inner
+            .store
+            .remember_device(user.id, &hash, now)
+            .await?
+            || method == "setup"
+        {
+            return Ok(token);
+        }
+        self.audit(
+            Some(user.id),
+            AuditKind::NewDevice,
+            Some(method.to_owned()),
+            client,
+        )
+        .await;
+        self.dispatch(Mail {
+            kind: MailKind::NewDevice,
+            to: user.email.clone(),
+            link: self.inner.config.sessions_url.clone(),
+            expires_at: None,
+            sign_in: Some(SignInDetails {
+                at: now,
+                method: method.to_owned(),
+                user_agent: client.user_agent.clone(),
+            }),
+        });
+        Ok(token)
+    }
+
+    fn dispatch(&self, mail: Mail) {
+        let mailer = Arc::clone(&self.inner.mailer);
+        tokio::spawn(async move {
+            if let Err(err) = mailer.send(mail).await {
+                tracing::error!(error = %err, "latchkey mail not sent");
+            }
+        });
     }
 
     /// Issues a one-time link and mails it from a background task, so the response time does
@@ -411,17 +482,12 @@ impl Latchkey {
             })
             .await?;
         link.query_pairs_mut().append_pair("token", &issued.token);
-        let mail = Mail {
+        self.dispatch(Mail {
             kind: mail_kind,
             to: user.email.clone(),
             link,
-            expires_at,
-        };
-        let mailer = Arc::clone(&self.inner.mailer);
-        tokio::spawn(async move {
-            if let Err(err) = mailer.send(mail).await {
-                tracing::error!(error = %err, "latchkey mail not sent");
-            }
+            expires_at: Some(expires_at),
+            sign_in: None,
         });
         self.audit(Some(user.id), audit_kind, None, client).await;
         Ok(())
