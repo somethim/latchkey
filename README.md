@@ -292,7 +292,8 @@ user handle differs; the device cookie is still set on every completed sign-in.
   presented secrets are constant-time.
 - A TOTP step is accepted once (`last_used_step`); recovery codes, links and passkey
   ceremonies are single use; passkey ceremonies are bound to the session and account that
-  started them and expire after 5 minutes; counter regressions are rejected by webauthn-rs.
+  started them (a sign-in, which has no session yet, to the browser by a one-off cookie) and
+  expire after 5 minutes; counter regressions are rejected by webauthn-rs.
 - Every stage change issues a new session token (`StoreSession { replaces }`).
 - The wrong-password throttle (10 per 15 minutes per address) counts unknown addresses too and
   is checked before hashing; the lockout (5 failures: 5 minutes, doubling to an hour) is
