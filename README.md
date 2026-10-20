@@ -1,315 +1,248 @@
 # latchkey
 
-Sign-in for a small [axum](https://github.com/tokio-rs/axum) app that you run for yourself and a
-few people you invite. It is a library: you nest its router into your app, protect your own
-routes with its extractors, and give it a database and a way to send mail.
+Sign-in building blocks and sign-in policy for Rust, without I/O.
 
-- **Password**, always followed by a second factor (TOTP, passkey or recovery code).
-- **Passkeys** with user verification required. A passkey signs in on its own.
-- **Email sign-in link**, single use, valid for 15 minutes, signs in directly.
-- **TOTP** (SHA-1, 6 digits, 30 s, ±1 step) with a replay guard on the time step.
-- **Encryption at rest**: TOTP secrets and passkey data are sealed with AES-256-GCM under a data
-  key of their own, each bound to its account and kind.
-- **Recovery codes**: 10 single-use codes, stored as SHA-256 hashes.
-- **First-open setup**: the owner account is created from a configured email address. Until it
-  is set up, a single-use link is mailed to that address only; the owner then sets a password,
-  enrols a passkey and/or TOTP, and receives recovery codes.
-- **Invites**: the owner invites family members by email; they go through the same setup.
-- **Sessions**: random 32-byte tokens stored as SHA-256, a new token on every stage change,
-  a list of active sessions with revocation, and a 5-minute step-up window for sensitive changes.
-- **Throttling**: per-IP and per-account rate limits, at most 10 wrong passwords per account in
-  any 15 minutes, and an account lockout that starts at 5 minutes after 5 failures and doubles
-  on every further 5 up to an hour.
-- **New-device mail**: a long-lived device cookie recognises browsers; a sign-in that completes
-  on one the account has not used before is mailed to the account.
-- **Audit log**: append-only, with client IPs stored only as an HMAC.
+latchkey hashes passwords, checks TOTP and recovery codes, runs passkey ceremonies, issues
+tokens, seals secrets, builds cookies, and decides what a sign-in flow does next. It does
+**not** talk to a database, send mail, serve HTTP, read the clock or draw randomness behind
+your back. Every function takes values (including `now` and an explicit `CryptoRng`) and
+returns values; your app stores what it is told to store, sends what it is told to send and
+answers its clients.
 
-The building blocks are maintained crates, not custom cryptography: `argon2`, `webauthn-rs`,
-`totp-rs`, `aes-gcm`, `sha2`, `hmac`, `subtle`, `rand` and `sqlx`.
+It was extracted from an axum sign-in service (latchkey 0.2) and keeps its behaviour and
+stored formats: Argon2id (64 MiB, t=3, p=2), TOTP (SHA-1, 6 digits, 30 s, ±1 step) with a
+replay guard, single-use recovery codes, passkeys with user verification, `__Host-` cookies,
+Origin and CSRF checks, a doubling lockout, a wrong-password throttle, new-device mail and an
+audit trail, now as pure functions and state machines.
 
-## Quick start
+## What is in it
 
-```toml
-[dependencies]
-latchkey = "0.2"
-axum = "0.8"
-tokio = { version = "1", features = ["full"] }
+| Module | What it does |
+|---|---|
+| `password` | `PasswordHasher`: Argon2id hash/verify, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
+| `totp` | `TotpSecret`, `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
+| `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
+| `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication and discoverable sign-in; `Ceremony<S>` bound to a session and user, 5 minutes |
+| `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, constant-time compare |
+| `seal` | `DataKey`: AES-256-GCM with associated data per owner and kind, compatible with 0.2's stored values |
+| `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
+| `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
+| `limits` | `RateLimiter` (fixed windows), `WrongPasswordThrottle` (sliding window), and their per-key states |
+| `session` | `Session` records, `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
+| `flow` | `sign_in`, `email_link`, `setup`, `invite`, `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
+| `mail` | `Mail` with `subject()` and `text()` for setup, sign-in link, invite and new-device mail |
+| `audit` | `AuditEvent` and `AuditKind` |
+
+### Features
+
+| Feature | Default | Adds | Pulls in |
+|---|---|---|---|
+| `os-rng` | yes | `latchkey::os_rng()`: a ChaCha12 generator seeded from the OS | `rand` |
+| `serde` | no | `Serialize`/`Deserialize` on ids, hashes, accounts, sessions, links, mail and audit events, limiter states | `serde` |
+| `passkeys` | no | the `passkey` module, `DataKey::seal_passkey`/`open_passkey`; implies `serde` | `webauthn-rs` (OpenSSL), `serde_json` |
+| `qr` | no | `totp::qr_svg` | `qrcodegen` |
+| `qr-png` | no | `totp::qr_png` | `qrcodegen-image`, `image` |
+
+Without `passkeys`, nothing links OpenSSL. The flows still accept a passkey result
+(`verified: bool`) from any WebAuthn library you prefer.
+
+## How the flows work
+
+Each flow is an enum of states. `advance` consumes the state, takes one event carrying the
+facts your app loaded (the account, its factor material, the presented device cookie, a
+verification result) and `now`, and returns either
+
+- `Ok(Transition { state, effects })`: the next state and what to do, or
+- `Err(Refusal { error, effects })`: the error to answer with **and** what must still be done
+  (count the failure, lock the account, write the audit event).
+
+```text
+sign_in:    Start -Password-> VerifyPassword -PasswordChecked-> SecondFactor -Code|Passkey-> SignedIn
+            Start -DiscoverablePasskey-> SignedIn
+email_link: Start -Request-> Requested            Start -Redeem-> SignedIn
+setup:      Start -RequestLink-> LinkRequested    Start -Redeem-> InSetup -PasswordSet-> InSetup -Finish-> Complete
+invite:     Start -Send-> Sent
+step_up:    Start -Password-> VerifyPassword -PasswordChecked-> Done      Start -Passkey-> Done
 ```
 
-```rust,no_run
-use std::net::SocketAddr;
-use std::sync::Arc;
+Password steps are split in two so the throttle and lockout are decided *before* the
+expensive hash, and an unknown address still costs a full (dummy) hash.
 
-use axum::{Router, routing::get};
-use latchkey::{
-    Config, CurrentUser, Latchkey, Mail, MailError, Mailer, RecentAuth, SqliteStore, async_trait,
+Effects are values: `StoreSession { session, replaces }`, `DeleteSession`, `SetCookie`,
+`SaveLockout`, `RecordWrongPassword`, `UseTotpStep`, `UseRecoveryCode`, `StoreRecoveryCodes`,
+`StoreLinkToken`, `SendMail`, `Audit`, `RememberDevice`, `CreateAccount`, `StorePassword`,
+`ActivateAccount`, `MarkStepUp`. Carry out every one, in order: storage effects ideally in one
+transaction, then mail. `UseTotpStep` and `UseRecoveryCode` are compare-and-set: if the stored
+step is already as new, or the code already used, the request lost a race and must be refused.
+
+## Example: password + TOTP with your own storage
+
+A condensed version of `examples/password_totp.rs` (`cargo run --example password_totp`).
+Storage is a `HashMap` here; use whatever you like.
+
+```rust,ignore
+use latchkey::account::AccountKey;
+use latchkey::flow::sign_in::{SignIn, SignInEvent};
+use latchkey::flow::{Client, CodeMaterial, Effect, TotpMaterial};
+
+// Once at start-up.
+let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
+let hasher = PasswordHasher::new(config.password(), &mut rng)?;   // builds the dummy hash
+let data_key = DataKey::new(&keys.data);                          // not in the database
+let mut throttle = WrongPasswordThrottle::new(config.rate_limits()); // behind a Mutex
+let mut per_ip = RateLimiter::per_minute(config.rate_limits().per_ip_per_minute);
+
+// POST /sign-in {email, password}
+per_ip.check(&format!("ip:{ip}"), now)?;
+let row = users.values().find(|row| Some(&row.account.email) == Email::parse(&email).ok().as_ref());
+let step = SignIn::Start.advance(&config, SignInEvent::Password {
+    login: email.clone(),
+    account: row.map(|row| row.account.clone()),
+    wrong_passwords: throttle.window(&AccountKey::from_login(&email)),
+}, now, &mut rng).map_err(|refusal| refusal.error)?;           // throttled or locked: no hash
+
+let matched = hasher.verify(&password, row.map(|row| &row.password)); // on a blocking thread
+match step.state.advance(&config, SignInEvent::PasswordChecked { matched, client }, now, &mut rng) {
+    Ok(step) => { apply(step.effects)?; /* reply with the CSRF token of the new session */ }
+    Err(refusal) => { apply(refusal.effects)?; return Err(refusal.error); }
+}
+
+// POST /sign-in/code {code}, with the second-factor session cookie
+let hash = TokenHash::of(cookie).ok_or(Error::Unauthorized)?;
+let session = sessions.get(&hash).cloned().ok_or(Error::Unauthorized)?;
+let row = &users[&session.user_id];
+let material = CodeMaterial {
+    totp: Some(TotpMaterial {
+        secret: data_key.open_totp(row.account.id, &row.sealed_totp)?,
+        last_used_step: row.last_step,
+    }),
+    recovery_codes: row.unused_recovery_hashes(),
 };
+match SignIn::second_factor(session, row.account.clone())
+    .advance(&config, SignInEvent::Code { code, material, client }, now, &mut rng)
+{
+    Ok(step) => apply(step.effects)?,          // new full session replaces the pending one
+    Err(refusal) => { apply(refusal.effects)?; return Err(refusal.error); }
+}
 
-struct MyMailer;
-
-#[async_trait]
-impl Mailer for MyMailer {
-    async fn send(&self, mail: Mail) -> Result<(), MailError> {
-        // Hand `mail.to`, `mail.subject()` and `mail.text()` (or your own template built
-        // from `mail.kind`, `mail.link` and `mail.sign_in`) to your mail provider.
-        Ok(())
+fn apply(effects: Vec<Effect>) -> Result<(), Error> {
+    for effect in effects {
+        match effect {
+            Effect::StoreSession { session, replaces } => { /* delete `replaces`, insert by session.token_hash */ }
+            Effect::SetCookie(cookie) => { /* response header: cookie.header_value() */ }
+            Effect::SaveLockout { user_id, lockout } => { /* store failures and locked_until */ }
+            Effect::RecordWrongPassword { key } => throttle.record(&key, now),
+            Effect::UseTotpStep { user_id, step } => {
+                // UPDATE ... SET last_step = ? WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)
+                // zero rows updated: refuse with Error::SignInFailed
+            }
+            Effect::RememberDevice { user_id, device_hash, seen_at } => { /* upsert */ }
+            Effect::SendMail(mail) => { /* queue mail.to, mail.subject(), mail.text() */ }
+            Effect::Audit(event) => { /* append */ }
+            _ => {}
+        }
     }
-}
-
-async fn home(user: CurrentUser) -> String {
-    format!("Hello, {}", user.display_name())
-}
-
-async fn danger(_user: RecentAuth) -> &'static str {
-    "only reachable within 5 minutes of signing in or stepping up"
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (secret_key, data_key): ([u8; 32], [u8; 32]) = load_keys();
-    let config = Config::new("owner@example.com", "https://home.example.com", secret_key, data_key)?;
-    let store = SqliteStore::connect("sqlite://auth.db").await?;
-    let auth = Latchkey::new(config, Arc::new(store), Arc::new(MyMailer)).await?;
-
-    let app = Router::new()
-        .route("/", get(home))
-        .route("/danger", get(danger))
-        .nest("/auth", auth.router())
-        .with_state(auth);
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
-    Ok(())
-}
-# fn load_keys() -> ([u8; 32], [u8; 32]) { ([1; 32], [2; 32]) }
-```
-
-If your app has its own state type, implement `axum::extract::FromRef<YourState> for Latchkey`
-and the extractors find it there. `examples/minimal.rs` is a runnable version that prints mail
-to the terminal: `cargo run --example minimal`.
-
-### Configuration
-
-`Config::new(owner_email, origin, secret_key, data_key)` fills in the defaults described above;
-every field is public. The ones you are most likely to change:
-
-| Field | Default | Meaning |
-|---|---|---|
-| `setup_url`, `sign_in_link_url`, `invite_url` | `/setup`, `/sign-in/link`, `/invite` on the origin | Front-end pages that receive `?token=` from mailed links |
-| `sessions_url` | `/settings/sessions` on the origin | Linked from the new-device mail |
-| `cookie_name` | `__Host-latchkey` | Must keep the `__Host-` prefix |
-| `device_cookie_name` | `__Host-latchkey_device` | Must keep the `__Host-` prefix |
-| `device_ttl` | 400 days | A device unused this long counts as new again |
-| `session_ttl` | 30 days | Lifetime of a signed-in session |
-| `step_up_window` | 5 minutes | How long a sign-in or step-up counts as recent |
-| `invite_ttl` | 3 days | Lifetime of an invite link |
-| `rate_limits` | 30/min per IP, 10/min per account, 10 wrong passwords per 15 min per account | In memory; the wrong-password window slides |
-| `password` | Argon2id, 64 MiB, t=3, p=2 | Hashing runs one at a time on a blocking thread |
-| `trust_forwarded_for` | `false` | Use the last `X-Forwarded-For` entry as the client IP (only behind your own proxy) |
-
-Both keys are 32 random bytes, must differ, and belong in your secret store, not the
-repository or the database's backups:
-
-- `secret_key` keys the HMAC used for IP addresses in sessions and the audit log.
-- `data_key` encrypts TOTP secrets and passkey data. Losing or changing it makes every enrolled
-  TOTP and passkey unreadable; `Latchkey::new` then refuses to start rather than run without
-  them.
-
-`Latchkey::reset_owner()` wipes the owner's password, factors and sessions so first-open setup
-runs again, for when every factor is lost; call it from a command-line entry point of your app.
-`Latchkey::purge_expired()` deletes expired sessions and links, and devices unused for
-`device_ttl`.
-
-### Upgrading from 0.1
-
-0.1 stored TOTP secrets and passkey data in plaintext. `Latchkey::new` refuses to start while
-such rows exist. Add a `data_key` to the configuration and run the migration once, before
-starting:
-
-```rust,no_run
-# use latchkey::{Config, Latchkey, SqliteStore};
-# async fn upgrade(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-let store = SqliteStore::connect("sqlite://auth.db").await?;
-let encrypted = Latchkey::encrypt_plaintext_secrets(config, &store).await?;
-println!("encrypted {encrypted} values");
-# Ok(())
-# }
-```
-
-Values that are already encrypted are skipped, so running it again does nothing. The store
-migration adds a `latchkey_devices` table; every browser counts as new once after the upgrade.
-
-## Sessions started by your app
-
-Sometimes the app completes a sign-in itself, for example a desktop app that opens the
-browser, where the user is already signed in, and receives a one-time code back on a loopback
-redirect. `Latchkey::issue_session` then starts a latchkey session for that account, exactly
-like a normal sign-in: a fresh token stored as SHA-256, `session_ttl`, the client IP as an
-HMAC, `authenticated_at` set to now (the step-up window starts), failed attempts cleared, a
-`sign_in` audit event with your method, and the new-device check and mail.
-
-**It checks no factor.** Only call it for a user that latchkey has just verified, such as the
-account of the browser session the hand-off started from. Never pass it a user id that a
-client chose. It refuses accounts that have not finished setup (`forbidden`) and accounts
-that are locked out (`too_many_attempts`), and `method` must be 1 to 32 characters from
-`a-z`, `0-9` and `_`, and not one of latchkey's own (`setup`, `password`, `passkey`,
-`email_link`, `totp`, `recovery_code`).
-
-```rust,no_run
-# use axum::http::HeaderMap;
-# use latchkey::{Error, IssueSession, Latchkey};
-# use uuid::Uuid;
-// In the browser, before handing off: who is signed in? (Check the origin and the CSRF token
-// with `CurrentUser::csrf_matches` yourself if this is an unsafe request.)
-async fn browser_user(auth: &Latchkey, headers: &HeaderMap) -> Result<Uuid, Error> {
-    Ok(auth.current_user_from_headers(headers).await?.id())
-}
-
-// Later, when the desktop app redeems the one-time code that carried that user id:
-async fn desktop_session(
-    auth: &Latchkey,
-    user: Uuid,
-    headers: &HeaderMap,
-    peer: std::net::IpAddr,
-) -> Result<(), Error> {
-    let request = IssueSession::from_headers(auth, "desktop_bridge", headers, Some(peer));
-    let issued = auth.issue_session(user, request).await?;
-    let [session_cookie, device_cookie] = issued.set_cookie_headers()?;
-    // Send both as `Set-Cookie` with `issued.csrf_token()` in the body, or hand
-    // `issued.session_cookie().value()` to the app's keyring.
-    # let _ = (session_cookie, device_cookie);
     Ok(())
 }
 ```
 
-- `IssueSession { method, client_ip, user_agent, device_cookie }` has public fields;
-  `IssueSession::new(method)` leaves the rest empty and `IssueSession::from_headers` reads them
-  the way the endpoints do (socket address or, with `trust_forwarded_for`, `X-Forwarded-For`;
-  `User-Agent`; the device cookie).
-- `IssuedSession` has the `user_id`, `session_id`, `csrf_token`, `authenticated_at`,
-  `expires_at` and two `IssuedCookie`s, `session_cookie` and `device_cookie`, each with
-  `name`, `value`, `max_age` and `set_cookie()` (`name=value; Path=/; Max-Age=…; HttpOnly;
-  Secure; SameSite=Lax`). Its `Debug` output leaves out the secrets.
-- `Latchkey::session_from_cookie(value)` and `Latchkey::current_user_from_headers(headers)`
-  return the `CurrentUser` of a completed, unexpired session, or `unauthorized`. Unlike the
-  extractor they check no origin or CSRF token; `CurrentUser::csrf_token` and
-  `CurrentUser::csrf_matches` are there for that.
+`examples/email_link.rs` and `examples/passkey_registration.rs` (feature `passkeys`) show
+the other two common paths.
 
-## Endpoints
+## Porting from 0.2
 
-All bodies are JSON. Responses that start a session set the cookie and include `stage` and
-`csrf_token`. Errors are `{"error": "<code>"}` with a generic code such as `sign_in_failed`,
-`step_up_required`, `csrf_rejected` or `too_many_attempts`.
+latchkey 0.2 was a service: an axum router, extractors, a SQLite store, a mailer and
+in-memory limiters. 0.3 keeps the decisions and leaves the I/O to the app.
 
-| Method and path | Needs | Purpose |
-|---|---|---|
-| `GET /setup/status` | | `{"setup_required": bool}` |
-| `POST /setup/start` | | Mails a setup link to the owner (always `202`) |
-| `POST /setup/redeem` `{token}` | | Starts a setup session |
-| `POST /setup/password` `{password}` | setup session | 12 to 1024 characters |
-| `POST /setup/complete` | setup session | Needs a password and a TOTP or passkey; returns `recovery_codes` |
-| `POST /invites` `{email, display_name?}` | owner, recent | Creates a member and mails an invite |
-| `POST /invites/redeem` `{token}` | | Starts a setup session for the invited member |
-| `GET /me` | any session | Account, stage, CSRF token, enrolled factors |
-| `POST /sign-in/password` `{email, password}` | | First step; leaves a `second_factor` session |
-| `POST /sign-in/code` `{code}` | second-factor session | TOTP or recovery code |
-| `POST /sign-in/second-factor/passkey/start`, `/finish` | second-factor session | Passkey as the second factor |
-| `POST /sign-in/passkey/start`, `/finish` `{ceremony, credential}` | | Passkey sign-in (discoverable credential) |
-| `POST /sign-in/email` `{email}` | | Mails a sign-in link (always `202`) |
-| `POST /sign-in/email/redeem` `{token}` | | Signs in |
-| `POST /sign-out` | any session | |
-| `POST /step-up/password` `{password, code}` | signed in | Refreshes the step-up window |
-| `POST /step-up/passkey/start`, `/finish` | signed in | Same, with a passkey |
-| `POST /password` `{password}` | recent | Changes the password |
-| `POST /totp/enrol`, `POST /totp/confirm` `{code}` | setup session, or recent | |
-| `DELETE /totp` | recent | Refused if it is the last factor |
-| `GET /passkeys` | signed in | |
-| `POST /passkeys/register/start` `{name?}`, `/finish` `{ceremony, credential}` | setup session, or recent | |
-| `DELETE /passkeys/{id}` | recent | Refused if it is the last factor |
-| `POST /recovery-codes` | recent | Replaces all recovery codes |
-| `GET /sessions` | signed in | |
-| `DELETE /sessions/{id}` | recent | |
-| `GET /audit?limit=` | signed in | Owner sees everything, members see their own events |
+| 0.2 | What the app does with 0.3 |
+|---|---|
+| `Latchkey::new(config, store, mailer)` | Build a `Config` with `Config::builder`, a `PasswordHasher`, a `DataKey` and an `IpTagKey`; create the owner with `NewAccount::owner` if your table has none |
+| `Config` public fields, `Config::new` | `Config::builder(owner_email, origin)` with setters; keys left `Config` (`DataKey::new`, `IpTagKey::new`, `seal::check_keys`) |
+| `Latchkey::router()` and its endpoints | Your own routes; each calls a flow's `advance` (table below) |
+| `Store` trait, `SqliteStore`, migrations | Your schema. 0.2's tables map one to one: users (`Account` + password hash), sessions (`Session`), tokens (`LinkToken` under `TokenHash`), totp (sealed secret, pending secret, `TotpStep`), passkeys (sealed JSON), recovery codes (`RecoveryCodeHash` + used flag), devices (`TokenHash` + last seen), audit (`AuditEvent`). Stored values (Argon2 PHC strings, SHA-256 hashes, `lk1` sealed values, stage/method/kind names, IP HMACs) are unchanged |
+| Atomic store methods (`consume_token`, `use_totp_step`, `use_recovery_code`, `replace_session`, `add_failure`) | `DELETE ... RETURNING` for links; compare-and-set for `UseTotpStep`/`UseRecoveryCode`; one transaction for `StoreSession { replaces }`; for `SaveLockout`, serialise per account (row lock) so concurrent failures are not lost |
+| `Mailer` trait, `TestMailer`, background sending | `Effect::SendMail(Mail)`; `Mail::subject()`/`text()` are unchanged; send after commit, retry if you like; `Mail::link_token()` for tests |
+| `CurrentUser`, `RecentAuth` extractors | Look the session up by `TokenHash::of(find_cookie(...))`, then `session.authorize(account.active, Access::SignedIn / Access::Recent, config.step_up_window(), now)` and, for unsafe methods, `RequestHeaders::check_session_request(&config.origin_string(), &session.csrf_token)` |
+| Router-wide Origin check | `RequestHeaders::check_origin` on every unsafe request |
+| `CSRF_HEADER` | `http::CSRF_HEADER` |
+| `Latchkey::issue_session` | `flow::issue_session(config, account, AppMethod::new("...")?, client, now, rng)` |
+| `Latchkey::session_from_cookie`, `current_user_from_headers` | `TokenHash::of` + your session lookup + `Session::authorize` |
+| `IssueSession::from_headers` | `http::client_ip`, `http::truncate_user_agent`, `http::find_cookie` into a `flow::Client` |
+| In-memory rate limiter and wrong-password log | `limits::RateLimiter` and `limits::WrongPasswordThrottle`, owned by the app (a `Mutex`), or their per-key states persisted |
+| In-memory passkey ceremonies | `passkey::Ceremony<S>` is `Serialize`: store it under `ceremony.id()`, remove it on finish, then `into_state(session, user, now)` |
+| `Clock`, `ManualClock`, `SystemClock` | Pass `now` (`OffsetDateTime::now_utc()` in production, any value in tests) |
+| `Latchkey::encrypt_plaintext_secrets` | `seal::classify_bytes`/`classify_text` find 0.1 plaintext; reseal with `DataKey::seal_bytes`/`seal_text` and `Aad::totp`/`Aad::passkey` |
+| Start-up check of sealed values | Open each stored value with `DataKey::open_totp`/`open_text` at start if you want the same refusal |
+| `Latchkey::reset_owner` | Delete the owner's password, factors and sessions, set it inactive, append `AuditKind::OwnerReset` |
+| `Latchkey::purge_expired` | Delete sessions and links past `expires_at`, devices unseen for `config.device_ttl()` |
+| `Error` with `IntoResponse` | `Error::code()`, `Error::http_status()`, `Error::detail()`, `Error::retry_after_secs()`; build the JSON body yourself |
+| `async_trait`, `tokio`, `axum`, `sqlx`, `tracing` dependencies | Gone. Run `PasswordHasher` on a blocking thread with a semaphore of one, as 0.2 did |
 
-Passkey `options` are the WebAuthn JSON for `navigator.credentials.create`/`get`; send the
-browser's credential back as `credential`, base64url-encoded as `webauthn-rs` expects.
+Endpoints to flow calls:
 
-### From the browser
+| 0.2 endpoint | 0.3 |
+|---|---|
+| `POST /setup/start`, `/setup/redeem`, `/setup/password`, `/setup/complete` | `Setup`: `RequestLink`, `Redeem { kind: Setup }`, `PasswordSet`, `Finish` |
+| `POST /invites`, `/invites/redeem` | `Invite::Send`, then `Setup` with `Redeem { kind: Invite }` |
+| `POST /sign-in/password`, `/sign-in/code`, `/sign-in/second-factor/passkey/*`, `/sign-in/passkey/*` | `SignIn`: `Password` + `PasswordChecked`, `Code`, `Passkey`, `DiscoverablePasskey` |
+| `POST /sign-in/email`, `/sign-in/email/redeem` | `EmailLink`: `Request`, `Redeem` |
+| `POST /step-up/password`, `/step-up/passkey/*` | `StepUp`: `Password` + `PasswordChecked`, `Passkey` |
+| `POST /sign-out` | `flow::sign_out` |
+| `POST /password`, `/recovery-codes` | `flow::password_changed`, `flow::regenerate_recovery_codes` (after `Access::Recent`) |
+| `POST /totp/enrol`, `/totp/confirm`, `DELETE /totp` | `TotpSecret::random` + `totp::enrolment` + `DataKey::seal_totp`; `totp::verify(pending, code, None, now)`; `Factors::may_remove_totp` (after `Access::Enrolling`/`Recent`) |
+| `/passkeys/register/*`, `DELETE /passkeys/{id}` | `RelyingParty::start_registration`/`finish_registration`; `Factors::may_remove_passkey` |
+| `GET /me`, `/sessions`, `DELETE /sessions/{id}`, `GET /audit` | Your queries; `Session::step_up_until` for `step_up_until` |
 
-- Send every unsafe request (`POST`, `DELETE`, ...) with the `x-csrf-token` header set to the
-  current `csrf_token` (also available from `GET /me`). The router and the `CurrentUser`
-  extractor reject unsafe requests whose `Origin` is not the configured origin, or, without an
-  `Origin` header, whose `Sec-Fetch-Site` is not `same-origin`.
-- Links in mail point at your front-end pages; read `token` from the query string, remove it
-  from the address bar, and post it to the matching `redeem` endpoint.
+Behavioural changes: `step_up` joins the reserved method names for app-issued sessions;
+`RelyingParty::finish_discoverable` takes the claimed user and refuses an assertion whose
+user handle differs; the device cookie is still set on every completed sign-in.
 
 ## Security notes
 
-- Passwords are hashed with Argon2id. An unknown email still runs a full hash against a dummy
-  value, and the response is the same as for a wrong password.
-- Link requests answer `202` whether or not the address belongs to an account, and mail goes
-  out on a background task so response times do not depend on it.
-- Tokens, CSRF values and recovery codes come from a CSPRNG; only their SHA-256 is stored.
-  CSRF tokens are compared in constant time.
-- Every stage change (setup, second factor, signed in) issues a new session token and deletes
-  the old one.
-- A TOTP code is accepted once: the matched time step is stored and older or equal steps are
-  refused, atomically.
-- Links, recovery codes and passkey ceremonies are single use. Passkey ceremonies are bound to
-  the session that started them and expire after 5 minutes.
-- Counter regressions on a passkey (a possible cloned authenticator) are rejected by
-  `webauthn-rs`.
-- TOTP secrets (also while pending confirmation) and passkey data are sealed with AES-256-GCM,
-  a random 96-bit nonce per write, and associated data `latchkey-totp:<user id>` or
-  `latchkey-passkey:<user id>:<passkey id>`, so a value copied to another row does not decrypt.
-  On start every stored value is checked: plaintext or a wrong data key stops the start.
-- Wrong passwords (sign-in and step-up) are counted per normalised email address in a
-  15-minute sliding window. The count is checked before the password is hashed, is not reset
-  by a successful sign-in, and applies to unknown addresses the same way.
-- The device cookie is a random 32-byte token, `HttpOnly`, `Secure`, `SameSite=Lax`, stored
-  only as SHA-256 per account. A sign-in on an unknown device (any method except setup
-  completion) writes `new_device` to the audit log and mails the account its time, method and
-  browser, with a link to the sessions page. Sign-out keeps the device cookie.
-- The crate forbids `unsafe` and denies `unwrap`, `expect` and `panic!` outside tests.
+- Passwords: Argon2id; an unknown account verifies against a dummy hash and fails the same
+  way as a wrong password. Passwords over 4096 bytes are not hashed as given.
+- Tokens (sessions, links, devices, CSRF) are 32 random bytes; only SHA-256 hashes are
+  stored, except the session's CSRF token, which the client needs again. Comparisons of
+  presented secrets are constant-time.
+- A TOTP step is accepted once (`last_used_step`); recovery codes, links and passkey
+  ceremonies are single use; passkey ceremonies are bound to the session and account that
+  started them and expire after 5 minutes; counter regressions are rejected by webauthn-rs.
+- Every stage change issues a new session token (`StoreSession { replaces }`).
+- The wrong-password throttle (10 per 15 minutes per address) counts unknown addresses too and
+  is checked before hashing; the lockout (5 failures: 5 minutes, doubling to an hour) is
+  per account.
+- Sealed values use a random 96-bit nonce and associated data `latchkey-totp:<user>` or
+  `latchkey-passkey:<user>:<passkey>`; `Aad::app(context)` is for the app's own secrets.
+- Secret types (`SecretToken`, `TotpSecret`, `RecoveryCode`, `PasswordHash`, `SetCookie`,
+  `DataKey`, `IpTagKey`, `Mail` links) redact `Debug`, have no `Display`, and zero their
+  memory on drop where they own it.
+- No `unsafe`; `unwrap`, `expect`, `panic!` and indexing are denied outside tests.
+- Randomness comes from the `CryptoRng` you pass, except webauthn-rs challenges, which it
+  draws from OpenSSL.
 
-Known trade-offs:
-
-- A locked account answers `too_many_attempts` instead of `sign_in_failed`, which tells an
-  attacker who has already made 5 wrong guesses that the address exists. (The wrong-password
-  throttle does not leak this way, since unknown addresses are throttled too.)
-- Rate-limit counters, wrong-password counts and passkey ceremonies live in memory: they reset
-  on restart and are not shared between several instances of the app. The lockout is stored
-  and survives restarts.
-- Anyone with both the database and `data_key` can read TOTP secrets and passkey data. Email
-  addresses, display names, passkey names and credential IDs stay in plaintext. There is no
-  key rotation yet: changing `data_key` means re-enrolling every factor.
-- The new-device check is per browser profile: clearing cookies or using a private window
-  counts as a new device, and someone who can read the device cookie from a known browser can
-  sign in elsewhere without a mail. The mail names the browser from its `User-Agent` but not
-  the IP address, which is only stored as an HMAC. Like every mail it goes out on a background
-  task; a failed send is logged, not retried.
+Known trade-offs carried over from 0.2: a locked account answers `too_many_attempts`, which
+tells someone who already made 5 wrong guesses that the address exists; the new-device check is
+per browser profile; anyone with both the database and the data key can read factors.
 
 ## Testing
 
-`cargo test` runs the unit and integration tests and the property tests (`proptest`) for token
-and cookie parsing, the rate limiter, the wrong-password window, encryption and request bodies.
+`cargo test --all-features` runs unit tests, property tests (`proptest`: token and cookie
+parsing, the limiter against a fixed-window model, the throttle against a sliding-window
+model, the lockout, TOTP replay, sealing) and integration tests that drive every flow through
+an in-memory app (`tests/common`), including a software passkey.
 
-`fuzz/` holds a [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) target, `json_bodies`,
-that feeds arbitrary bytes to the JSON body parsing of every endpoint. It builds on stable
-(`cargo build --manifest-path fuzz/Cargo.toml`); running it needs a nightly toolchain:
+`fuzz/` has a [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) target,
+`untrusted_inputs`, that feeds arbitrary bytes to every parser of client input. It builds on
+stable (`cargo build --manifest-path fuzz/Cargo.toml`); running it needs nightly:
+`cargo +nightly fuzz run untrusted_inputs`.
 
-```sh
-cargo install cargo-fuzz
-cargo +nightly fuzz run json_bodies
-```
+The minimum supported Rust version is 1.88.
 
-## What it does not do
+## For coding agents
 
-- No OAuth or OpenID Connect, neither as a provider nor as a client, and no forward-auth for
-  other applications.
-- No self-service sign-up: accounts are the owner and the people the owner invites.
-- No mail sending, templates or front-end pages; the app supplies those.
-- Storage ships for SQLite only. The `Store` trait is public so another database can be added.
+The crate ships [Symposium](https://symposium.dev) skills in `skills/`: `latchkey-basics`
+(how to use it correctly) and `latchkey-porting` (moving from 0.2). With the `cargo agents`
+CLI, `cargo agents use latchkey` in a project that depends on latchkey installs them.
 
 ## License
 

@@ -6,6 +6,74 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-dev]
+
+latchkey is now a sans-IO library: building blocks and sign-in policy as pure functions and
+state machines. The app owns storage, mail, HTTP, the clock and the random number generator.
+See "Porting from 0.2" in the README.
+
+### Added
+
+- `flow`: setup, invite, sign-in, email-link and step-up flows as enums with
+  `advance(self, config, event, now, rng) -> Result<Transition<_>, Refusal>`, where
+  `Transition` and `Refusal` carry `Effect` values for the app to carry out (store a session,
+  set a cookie, save the lockout, record a wrong password, use a TOTP step or recovery code,
+  store a link, send a mail, write an audit event, remember a device, create or activate an
+  account, store a password, mark a step-up). `issue_session`, `sign_out`,
+  `password_changed`, `regenerate_recovery_codes` and `check_code` as plain functions.
+- `password::PasswordHasher` with an explicit RNG for salts, `PasswordParams::new` (validated)
+  and `PasswordHash` (parsed PHC string).
+- `totp::verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`,
+  `TotpSecret`, `TotpStep`, `totp::enrolment`, and `totp::qr_svg` / `totp::qr_png` behind the
+  `qr` / `qr-png` features.
+- `recovery::generate(rng) -> RecoveryCodes { codes, hashes }` and
+  `recovery::verify(code, unused) -> Option<RecoveryCodeHash>`.
+- `passkey::RelyingParty` with two-step registration, authentication and discoverable
+  ceremonies; `passkey::Ceremony<S>`, serialisable, bound to a session and account and
+  expiring after 5 minutes; `passkey::record_use`; behind the `passkeys` feature.
+- `token`: `issue(rng) -> IssuedToken { token, hash }`, `TokenHash`, `SecretToken`, `ct_eq`.
+- `seal::DataKey` with `seal_totp`/`open_totp`, `seal_passkey`/`open_passkey`, `Aad::app` for
+  the app's own secrets, and `seal::check_keys`.
+- `http`: `CookieName`, `SetCookie`, `find_cookie`, `RequestHeaders::check_origin` and
+  `check_session_request`, `client_ip`, `truncate_user_agent`, `IpTagKey` and `IpTag`.
+- `limits`: `RateLimiter`, `FixedWindow`, `FailureWindow` and `WrongPasswordThrottle` as state
+  owned by the app.
+- `session`: `Session`, `Stage`, `SignInMethod`, `AppMethod`, `Access` and
+  `Session::authorize`, `Session::step_up_until`, `session::is_recent`.
+- `account`: `Account`, `NewAccount`, `Email`, `AccountKey`, `Role`, `Factors` (with the
+  last-factor rules), `Lockout` and `LockoutPolicy`.
+- Id newtypes `UserId`, `SessionId`, `PasskeyId`, `CeremonyId`.
+- `Config::builder` with validation; `Error::code`, `http_status`, `detail` and
+  `retry_after_secs`.
+- Cargo features `os-rng` (default; `latchkey::os_rng()`), `serde`, `passkeys`, `qr` and
+  `qr-png`.
+- Examples `password_totp`, `email_link` and `passkey_registration`.
+- Symposium agent skills `latchkey-basics` and `latchkey-porting` in `skills/`.
+- `deny.toml` and a GitHub Actions workflow.
+
+### Changed
+
+- Every function that needs the time takes `now`; every function that needs randomness takes
+  a `CryptoRng` (webauthn-rs still draws its own challenges from OpenSSL).
+- Secrets are newtypes with redacted `Debug`, no `Display`, zeroed on drop.
+- `step_up` is reserved, like latchkey's other method names, for app-issued sessions.
+- Discoverable passkey sign-in checks that the assertion's user handle is the account whose
+  passkeys were loaded.
+- The fuzz target is now `untrusted_inputs`, over every parser of client input.
+- The minimum supported Rust version is 1.88, tested in CI.
+
+### Removed
+
+- The axum router, the `CurrentUser` and `RecentAuth` extractors, `Latchkey` and
+  `IssueSession`/`IssuedSession`/`IssuedCookie`.
+- The `Store` trait, `SqliteStore` and its migrations.
+- The `Mailer` trait, `TestMailer` and background mail sending.
+- `Clock`, `SystemClock` and `ManualClock`.
+- In-memory global state (rate limiter, wrong-password log, passkey ceremonies).
+- `Latchkey::encrypt_plaintext_secrets`, `reset_owner` and `purge_expired` (now app code over
+  the `seal`, `audit` and record types).
+- The dependencies `axum`, `sqlx`, `tokio`, `async-trait` and `tracing`.
+
 ## [0.2.0-dev]
 
 ### Added
@@ -68,5 +136,6 @@ All notable changes to this crate are documented here. The format follows
 - `Mailer` trait and an in-memory `TestMailer`.
 
 [Unreleased]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
+[0.3.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
 [0.2.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/somethim/latchkey/releases/tag/v0.1.0
