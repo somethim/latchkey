@@ -337,6 +337,56 @@ fn lockout_after_five_failures_doubles_and_lifts() {
 }
 
 #[test]
+fn concurrent_failures_from_one_snapshot_both_count() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    let owner = app.owner_id();
+    app.rows.get_mut(&owner).unwrap().lockout.failures = 3;
+    // Two requests load the same account (3 failures) before either stores anything.
+    let mut refusals = Vec::new();
+    for _ in 0..2 {
+        let mut laptop = Browser::default();
+        let SignIn::SecondFactor { account, session } =
+            app.password_step(&mut laptop, OWNER, PASSWORD).unwrap()
+        else {
+            panic!("no second factor");
+        };
+        refusals.push((account, session));
+    }
+    let mut refused = Vec::new();
+    for (account, session) in refusals {
+        assert_eq!(account.lockout.failures, 3);
+        let step = SignIn::second_factor(session, account).advance(
+            &app.config,
+            SignInEvent::Code {
+                code: "000000".into(),
+                material: app.material(owner),
+                client: latchkey::flow::Client::default(),
+            },
+            app.now,
+            &mut app.rng,
+        );
+        refused.push(step.err().unwrap());
+    }
+    for refusal in refused {
+        assert_eq!(refusal.error, Error::SignInFailed);
+        assert!(
+            refusal
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, flow::Effect::RecordFailure { .. })),
+            "a failure is an increment, not a stored count"
+        );
+        app.apply(refusal.effects, &mut Browser::default()).unwrap();
+    }
+    let lockout = app.account(owner).unwrap().lockout;
+    assert_eq!(lockout.failures, 5, "both failures counted");
+    assert_eq!(lockout.locked_until, Some(app.now + Duration::minutes(5)));
+    assert_eq!(app.audit_count(AuditKind::Lockout), 1);
+}
+
+#[test]
 fn wrong_second_factor_codes_count_towards_lockout() {
     let mut app = App::new();
     let mut browser = Browser::default();

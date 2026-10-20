@@ -24,7 +24,8 @@ SQLite database keeps working with the app's own queries.
    token row. Names (`Stage`, `SignInMethod`, `LinkKind`, `AuditKind`, `Role`) parse from and
    print to the stored strings; `TotpStep::try_from(i64)` reads `last_step`.
 4. Write one `apply(effects)` function that handles every `flow::Effect` variant, with
-   compare-and-set for `UseTotpStep`/`UseRecoveryCode`, a transaction for
+   compare-and-set for `UseTotpStep`/`UseRecoveryCode`, an atomic `failures = failures + 1`
+   for `RecordFailure` (like 0.2's `add_failure`) followed by `LockoutPolicy::locked_until`, a transaction for
    `StoreSession { replaces }`, and mail sent after commit with `Mail::subject()`/`text()`.
 5. Replace each 0.2 endpoint with a route that loads data, calls the matching flow, applies
    effects and answers: `/sign-in/password` + `/sign-in/code` with `flow::sign_in`,

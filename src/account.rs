@@ -3,15 +3,21 @@
 //! The app stores accounts however it likes and builds an [`Account`] snapshot from its row
 //! before each flow step.
 //!
+//! Failures are counted with an atomic increment in the app's storage
+//! ([`Effect::RecordFailure`](crate::flow::Effect::RecordFailure)); the lock follows from the
+//! count *after* the increment:
+//!
 //! ```
 //! use latchkey::{Lockout, LockoutPolicy};
 //! use time::OffsetDateTime;
 //!
+//! let policy = LockoutPolicy::default();
 //! let now = OffsetDateTime::UNIX_EPOCH;
-//! let lockout = Lockout { failures: 4, locked_until: None };
-//! let (next, lock) = lockout.after_failure(&LockoutPolicy::default(), now);
-//! assert_eq!(lock, Some(time::Duration::minutes(5)));
-//! assert!(next.check(now).is_err());
+//! // UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures  -> 5
+//! let locked_until = policy.locked_until(5, now);
+//! assert_eq!(locked_until, Some(now + time::Duration::minutes(5)));
+//! let lockout = Lockout { failures: 5, locked_until };
+//! assert!(lockout.check(now).is_err());
 //! ```
 
 use time::{Duration, OffsetDateTime};
@@ -239,6 +245,40 @@ impl LockoutPolicy {
         }
         Some(lock.min(self.max))
     }
+
+    /// The lock an account gets once its failure count has been incremented to
+    /// `failures_after_increment` at `now`, if any. Store it as `locked_until` after applying
+    /// [`Effect::RecordFailure`](crate::flow::Effect::RecordFailure).
+    #[must_use]
+    pub fn locked_until(
+        &self,
+        failures_after_increment: u32,
+        now: OffsetDateTime,
+    ) -> Option<OffsetDateTime> {
+        self.lock_for(failures_after_increment)
+            .map(|lock| now.saturating_add(lock))
+    }
+
+    /// The [`AuditKind::Lockout`](crate::audit::AuditKind::Lockout) event to append when
+    /// `failures_after_increment` starts a lock, with the lock length (`300s`) as detail.
+    #[must_use]
+    pub fn lockout_event(
+        &self,
+        user_id: UserId,
+        failures_after_increment: u32,
+        now: OffsetDateTime,
+        ip_tag: Option<crate::http::IpTag>,
+    ) -> Option<crate::audit::AuditEvent> {
+        self.lock_for(failures_after_increment).map(|lock| {
+            crate::audit::AuditEvent::new(
+                crate::audit::AuditKind::Lockout,
+                Some(user_id),
+                now,
+                ip_tag,
+            )
+            .with_detail(format!("{}s", lock.whole_seconds()))
+        })
+    }
 }
 
 /// An account's consecutive failures and lock: the app stores both.
@@ -267,6 +307,10 @@ impl Lockout {
     }
 
     /// The state after one more failure, and the lock it starts, if any.
+    ///
+    /// Only for a single writer (such as an in-memory app). With a database, apply
+    /// [`Effect::RecordFailure`](crate::flow::Effect::RecordFailure) as an atomic increment
+    /// instead: computing from a snapshot loses failures that race.
     #[must_use]
     pub fn after_failure(
         self,
@@ -274,22 +318,15 @@ impl Lockout {
         now: OffsetDateTime,
     ) -> (Self, Option<Duration>) {
         let failures = self.failures.saturating_add(1);
-        match policy.lock_for(failures) {
-            Some(lock) => (
-                Self {
-                    failures,
-                    locked_until: Some(now.saturating_add(lock)),
-                },
-                Some(lock),
-            ),
-            None => (
-                Self {
-                    failures,
-                    locked_until: self.locked_until,
-                },
-                None,
-            ),
-        }
+        let lock = policy.lock_for(failures);
+        let locked_until = policy.locked_until(failures, now).or(self.locked_until);
+        (
+            Self {
+                failures,
+                locked_until,
+            },
+            lock,
+        )
     }
 }
 

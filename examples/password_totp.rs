@@ -13,7 +13,7 @@ use latchkey::seal::DataKey;
 use latchkey::session::Session;
 use latchkey::token::TokenHash;
 use latchkey::totp::{TotpSecret, TotpStep};
-use latchkey::{Config, Error, UserId};
+use latchkey::{Config, Error, LockoutPolicy, UserId};
 use time::OffsetDateTime;
 
 /// One row per account.
@@ -42,6 +42,7 @@ impl Store {
         &mut self,
         effects: Vec<Effect>,
         throttle: &mut WrongPasswordThrottle,
+        policy: &LockoutPolicy,
         now: OffsetDateTime,
     ) -> Result<(), Error> {
         for effect in effects {
@@ -57,9 +58,27 @@ impl Store {
                     cookie.name(),
                     cookie.max_age().whole_seconds()
                 ),
-                Effect::SaveLockout { user_id, lockout } => {
+                // One atomic statement in a database:
+                // UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures
+                Effect::RecordFailure {
+                    user_id,
+                    at,
+                    ip_tag,
+                } => {
                     if let Some(row) = self.users.get_mut(&user_id) {
-                        row.account.lockout = lockout;
+                        row.account.lockout.failures += 1;
+                        let failures = row.account.lockout.failures;
+                        if let Some(until) = policy.locked_until(failures, at) {
+                            row.account.lockout.locked_until = Some(until);
+                        }
+                        if let Some(event) = policy.lockout_event(user_id, failures, at, ip_tag) {
+                            self.audit.push(event.kind.to_string());
+                        }
+                    }
+                }
+                Effect::ClearFailures { user_id } => {
+                    if let Some(row) = self.users.get_mut(&user_id) {
+                        row.account.lockout = Lockout::default();
                     }
                 }
                 Effect::RecordWrongPassword { key } => throttle.record(&key, now),
@@ -148,11 +167,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         Ok(step) => step,
         Err(refusal) => {
-            store.apply(refusal.effects, &mut throttle, now)?;
+            store.apply(refusal.effects, &mut throttle, config.lockout(), now)?;
             return Err(refusal.error.into());
         }
     };
-    store.apply(step.effects, &mut throttle, now)?;
+    store.apply(step.effects, &mut throttle, config.lockout(), now)?;
     let SignIn::SecondFactor { session, .. } = step.state else {
         unreachable!()
     };
@@ -189,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut rng,
         )
         .map_err(|refusal| refusal.error)?;
-    store.apply(step.effects, &mut throttle, now)?;
+    store.apply(step.effects, &mut throttle, config.lockout(), now)?;
     if let SignIn::SignedIn { session, .. } = step.state {
         println!(
             "signed in with {:?}, session expires {}",

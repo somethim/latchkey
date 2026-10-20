@@ -17,7 +17,9 @@ See "Porting from 0.2" in the README.
 - `flow`: setup, invite, sign-in, email-link and step-up flows as enums with
   `advance(self, config, event, now, rng) -> Result<Transition<_>, Refusal>`, where
   `Transition` and `Refusal` carry `Effect` values for the app to carry out (store a session,
-  set a cookie, save the lockout, record a wrong password, use a TOTP step or recovery code,
+  set a cookie, count a failure as an atomic increment (`RecordFailure`, with
+  `LockoutPolicy::locked_until` and `LockoutPolicy::lockout_event` for the lock that follows)
+  or clear failures, record a wrong password, use a TOTP step or recovery code,
   store a link, send a mail, write an audit event, remember a device, create or activate an
   account, store a password, mark a step-up). `issue_session`, `sign_out`,
   `password_changed`, `regenerate_recovery_codes` and `check_code` as plain functions.

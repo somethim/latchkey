@@ -172,7 +172,7 @@ impl SignIn {
                     return Err(Refusal::with(Error::SignInFailed, effects));
                 };
                 if !matched {
-                    effects.extend(failure(config, &account, "password", &client, now));
+                    effects.extend(failure(&account, "password", &client, now));
                     return Err(Refusal::with(Error::SignInFailed, effects));
                 }
                 let (session, started) = start_session(
@@ -201,7 +201,7 @@ impl SignIn {
             ) => {
                 second_factor_allowed(config, &account, &session, now)?;
                 let Some(matched) = check_code(&code, &material, now) else {
-                    let effects = failure(config, &account, "code", &client, now);
+                    let effects = failure(&account, "code", &client, now);
                     return Err(Refusal::with(Error::SignInFailed, effects));
                 };
                 let method = match matched {

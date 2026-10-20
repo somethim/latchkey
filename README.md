@@ -69,11 +69,16 @@ Password steps are split in two so the throttle and lockout are decided *before*
 expensive hash, and an unknown address still costs a full (dummy) hash.
 
 Effects are values: `StoreSession { session, replaces }`, `DeleteSession`, `SetCookie`,
-`SaveLockout`, `RecordWrongPassword`, `UseTotpStep`, `UseRecoveryCode`, `StoreRecoveryCodes`,
+`RecordFailure`, `ClearFailures`, `RecordWrongPassword`, `UseTotpStep`, `UseRecoveryCode`, `StoreRecoveryCodes`,
 `StoreLinkToken`, `SendMail`, `Audit`, `RememberDevice`, `CreateAccount`, `StorePassword`,
 `ActivateAccount`, `MarkStepUp`. Carry out every one, in order: storage effects ideally in one
 transaction, then mail. `UseTotpStep` and `UseRecoveryCode` are compare-and-set: if the stored
 step is already as new, or the code already used, the request lost a race and must be refused.
+`RecordFailure` must be **one atomic statement** that increments the stored count
+(`UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures`), never a value
+computed from the `Account` snapshot, so failures that race are all counted; then store
+`config.lockout().locked_until(n, at)` and append `config.lockout().lockout_event(user, n, at,
+ip_tag)` when they are `Some`. `ClearFailures` resets the count and the lock.
 
 ## Example: password + TOTP with your own storage
 
@@ -130,7 +135,12 @@ fn apply(effects: Vec<Effect>) -> Result<(), Error> {
         match effect {
             Effect::StoreSession { session, replaces } => { /* delete `replaces`, insert by session.token_hash */ }
             Effect::SetCookie(cookie) => { /* response header: cookie.header_value() */ }
-            Effect::SaveLockout { user_id, lockout } => { /* store failures and locked_until */ }
+            Effect::RecordFailure { user_id, at, ip_tag } => {
+                // One statement: UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures
+                // then, with n: locked_until = config.lockout().locked_until(n, at),
+                // audit config.lockout().lockout_event(user_id, n, at, ip_tag)
+            }
+            Effect::ClearFailures { user_id } => { /* failures = 0, locked_until = NULL */ }
             Effect::RecordWrongPassword { key } => throttle.record(&key, now),
             Effect::UseTotpStep { user_id, step } => {
                 // UPDATE ... SET last_step = ? WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)
@@ -160,7 +170,7 @@ in-memory limiters. 0.3 keeps the decisions and leaves the I/O to the app.
 | `Config` public fields, `Config::new` | `Config::builder(owner_email, origin)` with setters; keys left `Config` (`DataKey::new`, `IpTagKey::new`, `seal::check_keys`) |
 | `Latchkey::router()` and its endpoints | Your own routes; each calls a flow's `advance` (table below) |
 | `Store` trait, `SqliteStore`, migrations | Your schema. 0.2's tables map one to one: users (`Account` + password hash), sessions (`Session`), tokens (`LinkToken` under `TokenHash`), totp (sealed secret, pending secret, `TotpStep`), passkeys (sealed JSON), recovery codes (`RecoveryCodeHash` + used flag), devices (`TokenHash` + last seen), audit (`AuditEvent`). Stored values (Argon2 PHC strings, SHA-256 hashes, `lk1` sealed values, stage/method/kind names, IP HMACs) are unchanged |
-| Atomic store methods (`consume_token`, `use_totp_step`, `use_recovery_code`, `replace_session`, `add_failure`) | `DELETE ... RETURNING` for links; compare-and-set for `UseTotpStep`/`UseRecoveryCode`; one transaction for `StoreSession { replaces }`; for `SaveLockout`, serialise per account (row lock) so concurrent failures are not lost |
+| Atomic store methods (`consume_token`, `use_totp_step`, `use_recovery_code`, `replace_session`, `add_failure`) | `DELETE ... RETURNING` for links; compare-and-set for `UseTotpStep`/`UseRecoveryCode`; one transaction for `StoreSession { replaces }`; `RecordFailure` as one atomic `failures = failures + 1` statement, then `LockoutPolicy::locked_until` on the returned count |
 | `Mailer` trait, `TestMailer`, background sending | `Effect::SendMail(Mail)`; `Mail::subject()`/`text()` are unchanged; send after commit, retry if you like; `Mail::link_token()` for tests |
 | `CurrentUser`, `RecentAuth` extractors | Look the session up by `TokenHash::of(find_cookie(...))`, then `session.authorize(account.active, Access::SignedIn / Access::Recent, config.step_up_window(), now)` and, for unsafe methods, `RequestHeaders::check_session_request(&config.origin_string(), &session.csrf_token)` |
 | Router-wide Origin check | `RequestHeaders::check_origin` on every unsafe request |

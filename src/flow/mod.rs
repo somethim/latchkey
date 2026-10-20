@@ -35,7 +35,7 @@ use rand_core::CryptoRng;
 use time::OffsetDateTime;
 
 use crate::Error;
-use crate::account::{Account, AccountKey, Lockout, NewAccount};
+use crate::account::{Account, AccountKey, NewAccount};
 use crate::audit::{AuditEvent, AuditKind};
 use crate::config::Config;
 use crate::http::{IpTag, SetCookie};
@@ -175,12 +175,25 @@ pub enum Effect {
     },
     /// Send this `Set-Cookie` header.
     SetCookie(SetCookie),
-    /// Store the account's failure count and lock.
-    SaveLockout {
+    /// Count one failure, **atomically**: `UPDATE ... SET failures = failures + 1 ...
+    /// RETURNING failures` (never read-modify-write from the [`Account`] snapshot, or
+    /// concurrent failures are lost). Then, with the returned count `n`, store
+    /// [`LockoutPolicy::locked_until`](crate::LockoutPolicy::locked_until)`(n, at)` as
+    /// `locked_until` when it is `Some`, and append
+    /// [`LockoutPolicy::lockout_event`](crate::LockoutPolicy::lockout_event)`(user_id, n, at,
+    /// ip_tag)` when it is `Some`.
+    RecordFailure {
         /// Whose.
         user_id: UserId,
-        /// The new state.
-        lockout: Lockout,
+        /// Now.
+        at: OffsetDateTime,
+        /// The client, for the lockout audit event.
+        ip_tag: Option<IpTag>,
+    },
+    /// Reset the account's failure count to 0 and clear `locked_until`.
+    ClearFailures {
+        /// Whose.
+        user_id: UserId,
     },
     /// Record a wrong password for the throttle
     /// ([`WrongPasswordThrottle::record`](crate::limits::WrongPasswordThrottle::record)).
@@ -360,9 +373,8 @@ fn complete_sign_in<R: CryptoRng + ?Sized>(
     now: OffsetDateTime,
     rng: &mut R,
 ) -> (Session, Vec<Effect>) {
-    let mut effects = vec![Effect::SaveLockout {
+    let mut effects = vec![Effect::ClearFailures {
         user_id: account.id,
-        lockout: Lockout::default(),
     }];
     let (session, started) = start_session(
         config,
@@ -432,28 +444,17 @@ fn recognise_device<R: CryptoRng + ?Sized>(
 }
 
 /// Audits the failure and counts it towards the lockout.
-fn failure(
-    config: &Config,
-    account: &Account,
-    detail: &str,
-    client: &Client,
-    now: OffsetDateTime,
-) -> Vec<Effect> {
-    let mut effects = vec![Effect::Audit(
-        audit(AuditKind::SignInFailed, Some(account.id), client, now).with_detail(detail),
-    )];
-    let (lockout, lock) = account.lockout.after_failure(config.lockout(), now);
-    effects.push(Effect::SaveLockout {
-        user_id: account.id,
-        lockout,
-    });
-    if let Some(lock) = lock {
-        effects.push(Effect::Audit(
-            audit(AuditKind::Lockout, Some(account.id), client, now)
-                .with_detail(format!("{}s", lock.whole_seconds())),
-        ));
-    }
-    effects
+fn failure(account: &Account, detail: &str, client: &Client, now: OffsetDateTime) -> Vec<Effect> {
+    vec![
+        Effect::Audit(
+            audit(AuditKind::SignInFailed, Some(account.id), client, now).with_detail(detail),
+        ),
+        Effect::RecordFailure {
+            user_id: account.id,
+            at: now,
+            ip_tag: client.ip_tag.clone(),
+        },
+    ]
 }
 
 /// Issues a link and mails it, unless the resend cooldown is running (not for invites).

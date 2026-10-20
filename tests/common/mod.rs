@@ -220,8 +220,25 @@ impl App {
                     self.sessions.remove(&token_hash);
                 }
                 Effect::SetCookie(cookie) => browser.set(&cookie),
-                Effect::SaveLockout { user_id, lockout } => {
-                    self.rows.get_mut(&user_id).unwrap().lockout = lockout;
+                Effect::RecordFailure {
+                    user_id,
+                    at,
+                    ip_tag,
+                } => {
+                    // The atomic increment a database does in one statement.
+                    let row = self.rows.get_mut(&user_id).unwrap();
+                    row.lockout.failures = row.lockout.failures.saturating_add(1);
+                    let failures = row.lockout.failures;
+                    let policy = *self.config.lockout();
+                    if let Some(until) = policy.locked_until(failures, at) {
+                        row.lockout.locked_until = Some(until);
+                    }
+                    if let Some(event) = policy.lockout_event(user_id, failures, at, ip_tag) {
+                        self.audit.push(event);
+                    }
+                }
+                Effect::ClearFailures { user_id } => {
+                    self.rows.get_mut(&user_id).unwrap().lockout = Lockout::default();
                 }
                 Effect::RecordWrongPassword { key } => self.throttle.record(&key, self.now),
                 Effect::UseTotpStep { user_id, step } => {

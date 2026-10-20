@@ -26,6 +26,11 @@ app side right is what keeps sign-in secure.
 - Persist the TOTP last-used step. `Effect::UseTotpStep` and `Effect::UseRecoveryCode` are
   compare-and-set: update only if newer / unused, and refuse the request if the update
   touched no row.
+- Apply `Effect::RecordFailure` as one atomic statement
+  (`UPDATE ... SET failures = failures + 1 ... RETURNING failures`), never by writing a count
+  computed from the `Account` snapshot; then set `locked_until` from
+  `config.lockout().locked_until(n, at)` and append `config.lockout().lockout_event(..)` when
+  `Some`. `Effect::ClearFailures` resets both.
 - Redeem links atomically (`DELETE ... RETURNING`), then pass the deleted `LinkToken` (or
   `None`) to the flow.
 

@@ -13,7 +13,7 @@ use super::{
     use_code,
 };
 use crate::Error;
-use crate::account::{Account, AccountKey, Lockout};
+use crate::account::{Account, AccountKey};
 use crate::audit::AuditKind;
 use crate::config::Config;
 use crate::limits::FailureWindow;
@@ -128,17 +128,16 @@ impl StepUp {
                     let mut effects = vec![Effect::RecordWrongPassword {
                         key: AccountKey::from(&account.email),
                     }];
-                    effects.extend(failure(config, &account, "step_up_password", &client, now));
+                    effects.extend(failure(&account, "step_up_password", &client, now));
                     return Err(Refusal::with(Error::SignInFailed, effects));
                 }
                 let Some(matched) = check_code(&code, &material, now) else {
-                    let effects = failure(config, &account, "step_up_code", &client, now);
+                    let effects = failure(&account, "step_up_code", &client, now);
                     return Err(Refusal::with(Error::SignInFailed, effects));
                 };
                 let mut effects = use_code(&account, matched, &client, now);
-                effects.push(Effect::SaveLockout {
+                effects.push(Effect::ClearFailures {
                     user_id: account.id,
-                    lockout: Lockout::default(),
                 });
                 Ok(stepped_up(&account, session, &client, now, effects))
             }
