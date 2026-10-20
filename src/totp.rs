@@ -56,10 +56,20 @@ impl TotpSecret {
         Self(bytes)
     }
 
-    /// Wraps secret bytes read back from storage (after opening them).
-    #[must_use]
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    /// Wraps secret bytes read back from storage (after opening them) or imported.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] with [`InvalidRequestReason::TotpSecretTooShort`] for fewer
+    /// than [`MIN_SECRET_BYTES`] bytes, which latchkey would never accept a code for.
+    pub fn from_bytes(mut bytes: Vec<u8>) -> Result<Self, Error> {
+        if bytes.len() < MIN_SECRET_BYTES {
+            bytes.zeroize();
+            return Err(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretTooShort,
+            ));
+        }
+        Ok(Self(bytes))
     }
 
     /// Decodes a base32 secret (RFC 4648, as authenticator apps and `otpauth://` URLs carry
@@ -108,13 +118,7 @@ impl TotpSecret {
             }
         }
         buffer.zeroize();
-        if bytes.len() < MIN_SECRET_BYTES {
-            bytes.zeroize();
-            return Err(Error::InvalidRequest(
-                InvalidRequestReason::TotpSecretTooShort,
-            ));
-        }
-        Ok(Self(bytes))
+        Self::from_bytes(bytes)
     }
 
     /// The raw secret, to seal for storage.
@@ -425,7 +429,15 @@ mod tests {
 
     #[test]
     fn short_secrets_are_refused() {
-        let secret = TotpSecret::from_bytes(vec![1; 8]);
+        assert_eq!(
+            TotpSecret::from_bytes(vec![1; MIN_SECRET_BYTES - 1]).err(),
+            Some(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretTooShort
+            ))
+        );
+        assert!(TotpSecret::from_bytes(vec![1; MIN_SECRET_BYTES]).is_ok());
+        // Still refused when one is built inside the crate.
+        let secret = TotpSecret(vec![1; 8]);
         assert!(enrolment(&secret, "Home", "o@example.com").is_err());
         assert_eq!(
             verify(&secret, "123456", None, at(1_800_000_000)),

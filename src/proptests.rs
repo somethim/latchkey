@@ -250,7 +250,7 @@ proptest! {
         let _ = text.parse::<crate::session::SignInMethod>();
         let _ = crate::flow::invite::optional_name(Some(text.clone()));
         let _ = crate::password::PasswordHash::try_from(text.as_str());
-        let secret = TotpSecret::from_bytes(vec![0; 20]);
+        let secret = TotpSecret::random(&mut crate::test_rng());
         let _ = totp::verify(&secret, &text, None, at(0));
     }
 }

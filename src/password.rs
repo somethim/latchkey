@@ -111,13 +111,44 @@ impl PasswordHash {
     }
 }
 
+impl PasswordHash {
+    /// Accepts an Argon2 PHC string of any variant (`argon2i`, `argon2d`, `argon2id`) and
+    /// version, such as one imported from another system. [`PasswordHasher::verify`] checks
+    /// it with its own variant and parameters, and [`PasswordHasher::needs_rehash`] is `true`
+    /// for anything but this hasher's Argon2id: rehash after the next successful sign-in.
+    /// Use `try_from` for latchkey's own stored hashes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] with [`CryptoReason::StoredPasswordHash`] for anything that is not
+    /// an Argon2 PHC string with parameters, salt and hash.
+    pub fn from_legacy_argon2(phc: &str) -> Result<Self, Error> {
+        parse_argon2(phc, &["argon2i", "argon2d", "argon2id"], None)?;
+        Ok(Self(phc.to_owned()))
+    }
+}
+
+/// Parses `phc` as an Argon2 PHC string of one of `algorithms` (and `version`, if given)
+/// with parameters, salt and hash.
+fn parse_argon2(phc: &str, algorithms: &[&str], version: Option<u32>) -> Result<(), Error> {
+    let invalid = Error::Crypto(CryptoReason::StoredPasswordHash);
+    let parsed = argon2::PasswordHash::new(phc).map_err(|_| invalid.clone())?;
+    let shaped = algorithms.contains(&parsed.algorithm.as_str())
+        && version.is_none_or(|version| parsed.version == Some(version))
+        && parsed.salt.is_some()
+        && parsed.hash.is_some()
+        && Params::try_from(&parsed).is_ok();
+    if shaped { Ok(()) } else { Err(invalid) }
+}
+
 impl TryFrom<String> for PasswordHash {
     type Error = Error;
 
-    /// Accepts a PHC string read back from storage.
+    /// Accepts an Argon2id (version 19) PHC string read back from storage, as latchkey
+    /// writes them. For other Argon2 variants or versions, see
+    /// [`PasswordHash::from_legacy_argon2`].
     fn try_from(phc: String) -> Result<Self, Error> {
-        argon2::PasswordHash::new(&phc)
-            .map_err(|_| Error::Crypto(CryptoReason::StoredPasswordHash))?;
+        parse_argon2(&phc, &["argon2id"], Some(Version::V0x13.into()))?;
         Ok(Self(phc))
     }
 }
@@ -422,13 +453,44 @@ mod tests {
             format!("$argon2id$v=16$m=64,t=1,p=1${salt}${hash32}"),
             format!("$argon2id$m=64,t=1,p=1${salt}${hash32}"),
             format!("$argon2id$v=19$m=64,t=1,p=1${salt}$AAAAAAAAAAAAAAAAAAAAAA"),
-            format!("$scrypt$ln=15,r=8,p=1${salt}${hash32}"),
         ] {
-            let stored = PasswordHash::try_from(phc.as_str())?;
+            let stored = PasswordHash::from_legacy_argon2(&phc)?;
             assert!(hasher.needs_rehash(&stored), "{phc}");
         }
         let same = PasswordHash::try_from(format!("$argon2id$v=19$m=64,t=1,p=1${salt}${hash32}"))?;
         assert!(!hasher.needs_rehash(&same));
+        Ok(())
+    }
+
+    #[test]
+    fn only_argon2id_loads_as_latchkeys_own_and_legacy_argon2_explicitly() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let salt = [7u8; 16];
+        let legacy = argon2::Argon2::new(
+            Algorithm::Argon2i,
+            Version::V0x10,
+            Params::new(64, 1, 1, None).map_err(|_| Error::Rng)?,
+        )
+        .hash_password_with_salt(b"correct horse battery", &salt)
+        .map_err(|_| Error::Rng)?
+        .to_string();
+        assert!(PasswordHash::try_from(legacy.as_str()).is_err());
+        let imported = PasswordHash::from_legacy_argon2(&legacy)?;
+        assert!(hasher.verify("correct horse battery", Some(&imported)));
+        assert!(!hasher.verify("wrong horse battery", Some(&imported)));
+        assert!(hasher.needs_rehash(&imported));
+        let salt = "c29tZXNhbHRzb21lc2FsdA";
+        let hash32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        for bad in [
+            format!("$scrypt$ln=15,r=8,p=1${salt}${hash32}"),
+            format!("$argon2id$v=19$m=64,t=1,p=1${salt}"),
+            "$2b$12$abcdefghijklmnopqrstuuJ4n7nVvC0rI7vJkQe2Yt8cG1aWm6r2".to_owned(),
+            "not a hash".to_owned(),
+        ] {
+            assert!(PasswordHash::try_from(bad.as_str()).is_err(), "{bad}");
+            assert!(PasswordHash::from_legacy_argon2(&bad).is_err(), "{bad}");
+        }
         Ok(())
     }
 

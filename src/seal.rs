@@ -255,8 +255,8 @@ impl DataKey {
     /// plaintext leftover from latchkey 0.1.
     pub fn open_totp(&self, user: UserId, stored: &[u8]) -> Result<TotpSecret, Error> {
         self.open_bytes(&Aad::totp(user), stored)
-            .map(TotpSecret::from_bytes)
             .ok_or(Error::Crypto(CryptoReason::TotpDecrypt))
+            .and_then(TotpSecret::from_bytes)
     }
 
     /// Seals a passkey as JSON text.

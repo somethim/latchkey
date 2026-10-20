@@ -172,8 +172,11 @@ pub mod fuzzing {
         let _ = crate::token::TokenHash::of(&text);
         let _ = crate::token::TokenHash::of_foreign(&text);
         let _ = crate::recovery::RecoveryCodeHash::of(&text);
-        let secret = crate::totp::TotpSecret::from_bytes(vec![0; 20]);
-        let _ = crate::totp::verify(&secret, &text, None, now);
+        if let Ok(secret) = crate::totp::TotpSecret::from_bytes(vec![0; 20]) {
+            let _ = crate::totp::verify(&secret, &text, None, now);
+        }
+        let _ = crate::totp::TotpSecret::from_base32(&text);
+        let _ = crate::password::PasswordHash::from_legacy_argon2(&text);
         let _ = crate::account::Email::parse(&text);
         let _ = crate::account::AccountKey::from_login(&text);
         let _ = crate::password::check_policy(&text);
