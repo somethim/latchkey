@@ -221,6 +221,7 @@ impl From<TotpRefusal> for Error {
 
 /// What to show when enrolling a secret.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Enrolment {
     /// The secret in base32, for manual entry.
     pub secret_base32: String,

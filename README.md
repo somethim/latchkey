@@ -151,14 +151,13 @@ mod passkey_sign_in {
     use latchkey::http::{SetCookie, find_cookie};
     use latchkey::passkey::webauthn_rs::prelude::{
         AuthenticationResult, Passkey, PasskeyAuthentication, PublicKeyCredential,
-        RequestChallengeResponse,
     };
-    use latchkey::passkey::{CEREMONY_TTL, Ceremony, RelyingParty};
+    use latchkey::passkey::{CEREMONY_TTL, Ceremony, RelyingParty, SignInStarted};
     use latchkey::{Config, CryptoRng, Error, UserId};
     use time::OffsetDateTime;
 
-    /// POST /sign-in/passkey/start {email}: store the ceremony under `ceremony.id()`, answer
-    /// with the challenge and that id, and send the cookie.
+    /// POST /sign-in/passkey/start {email}: store `started.ceremony` under its id, answer
+    /// with `started.challenge` and that id, and send the cookie.
     pub fn start(
         config: &Config,
         rp: &RelyingParty,
@@ -166,10 +165,11 @@ mod passkey_sign_in {
         passkeys: &[Passkey],
         now: OffsetDateTime,
         rng: &mut impl CryptoRng,
-    ) -> Result<(RequestChallengeResponse, Ceremony<PasskeyAuthentication>, SetCookie), Error> {
-        let (challenge, ceremony, binding) = rp.start_sign_in(user, passkeys, now, rng)?;
-        let cookie = SetCookie::new(config.ceremony_cookie_name().clone(), &binding, CEREMONY_TTL);
-        Ok((challenge, ceremony, cookie))
+    ) -> Result<(SignInStarted<PasskeyAuthentication>, SetCookie), Error> {
+        let started = rp.start_sign_in(user, passkeys, now, rng)?;
+        let name = config.ceremony_cookie_name().clone();
+        let cookie = SetCookie::new(name, &started.binding_token, CEREMONY_TTL);
+        Ok((started, cookie))
     }
 
     /// POST /sign-in/passkey/finish {ceremony_id, credential}: `ceremony` is the one the app
@@ -300,13 +300,12 @@ impl App {
         let hash = TokenHash::of(cookie).ok_or(Error::Unauthorized)?;
         let session = self.sessions.get(&hash).cloned().ok_or(Error::Unauthorized)?;
         let row = self.users.get(&session.user_id).ok_or(Error::Unauthorized)?;
-        let material = CodeMaterial {
-            totp: Some(TotpMaterial {
-                secret: self.data_key.open_totp(row.account.id, &row.sealed_totp)?,
-                last_used_step: row.last_step,
-            }),
-            recovery_codes: row.recovery.iter().filter(|(_, used)| !used).map(|(h, _)| *h).collect(),
-        };
+        let totp = TotpMaterial::new(
+            self.data_key.open_totp(row.account.id, &row.sealed_totp)?,
+            row.last_step,
+        );
+        let unused = row.recovery.iter().filter(|(_, used)| !used).map(|(h, _)| *h).collect();
+        let material = CodeMaterial::new(Some(totp), unused);
         let event = SignInEvent::Code { code, material, client };
         match SignIn::second_factor(session, row.account.clone()).advance(&self.config, event, now, rng) {
             Ok(step) => self.apply(step.effects, now), // a full session replaces the pending one

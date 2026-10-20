@@ -26,6 +26,7 @@ use crate::account::AccountKey;
 /// The limits latchkey 0.2 applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct RateLimits {
     /// Sign-in requests per client IP per minute (fixed windows). Default 30.
     pub per_ip_per_minute: u32,
@@ -37,6 +38,24 @@ pub struct RateLimits {
     pub wrong_passwords_per_account: u32,
     /// Default 15 minutes.
     pub wrong_password_window: Duration,
+}
+
+impl RateLimits {
+    /// Limits other than the defaults, field by field as documented above.
+    #[must_use]
+    pub const fn new(
+        per_ip_per_minute: u32,
+        per_account_per_minute: u32,
+        wrong_passwords_per_account: u32,
+        wrong_password_window: Duration,
+    ) -> Self {
+        Self {
+            per_ip_per_minute,
+            per_account_per_minute,
+            wrong_passwords_per_account,
+            wrong_password_window,
+        }
+    }
 }
 
 impl Default for RateLimits {

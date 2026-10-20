@@ -119,18 +119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.users.insert(
         id,
         UserRow {
-            account: Account {
-                id,
-                email: Email::parse("owner@example.com")?,
-                display_name: "Owner".into(),
-                role: Role::Owner,
-                active: true,
-                factors: Factors {
-                    password: true,
-                    totp: true,
-                    passkeys: 0,
-                },
-                lockout: Lockout::default(),
+            account: {
+                let mut account = Account::new(id, Email::parse("owner@example.com")?, Role::Owner);
+                account.display_name = "Owner".into();
+                account.active = true;
+                account.factors = Factors::new(true, true, 0);
+                account
             },
             password: hasher.hash_new_password("correct horse battery staple", &mut rng)?,
             sealed_totp: data_key.seal_totp(&mut rng, id, &secret)?,
@@ -188,13 +182,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .users
         .get(&session.user_id)
         .ok_or(Error::Unauthorized)?;
-    let material = CodeMaterial {
-        totp: Some(TotpMaterial {
-            secret: data_key.open_totp(row.account.id, &row.sealed_totp)?,
-            last_used_step: row.last_step,
-        }),
-        recovery_codes: Vec::new(),
-    };
+    let material = CodeMaterial::new(
+        Some(TotpMaterial::new(
+            data_key.open_totp(row.account.id, &row.sealed_totp)?,
+            row.last_step,
+        )),
+        Vec::new(),
+    );
     let code = secret.code_at(now)?; // what the authenticator app shows
     let step = SignIn::second_factor(session, row.account.clone())
         .advance(

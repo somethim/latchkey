@@ -40,6 +40,7 @@ use webauthn_rs::prelude::{
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
 use crate::Error;
+use crate::account::Account;
 use crate::config::Config;
 use crate::ids::{CeremonyId, SessionId, UserId};
 use crate::token::{self, SecretToken, TokenHash};
@@ -165,6 +166,88 @@ impl<S> Ceremony<S> {
 
 const UNKNOWN: Error = Error::InvalidRequest(InvalidRequestReason::UnknownCeremony);
 
+/// A started ceremony: the challenge to send the browser, and the ceremony to store under
+/// its [`id`](Ceremony::id).
+#[derive(Debug)]
+#[must_use = "send the challenge and store the ceremony"]
+#[non_exhaustive]
+pub struct Started<C, S> {
+    /// The JSON for `navigator.credentials.create()` or `.get()`.
+    pub challenge: C,
+    /// The server side of the ceremony, bound to the session that started it.
+    pub ceremony: Ceremony<S>,
+}
+
+/// A started passkey sign-in, before any session exists: also the binding token for the
+/// browser that started it.
+#[derive(Debug)]
+#[must_use = "send the challenge and the binding cookie, and store the ceremony"]
+#[non_exhaustive]
+pub struct SignInStarted<S> {
+    /// The JSON for `navigator.credentials.get()`.
+    pub challenge: RequestChallengeResponse,
+    /// The server side of the ceremony; it keeps only the binding token's hash.
+    pub ceremony: Ceremony<S>,
+    /// Send it as the cookie named
+    /// [`Config::ceremony_cookie_name`](crate::Config::ceremony_cookie_name), for
+    /// [`CEREMONY_TTL`], and pass the cookie's value to [`Ceremony::into_browser_state`].
+    pub binding_token: SecretToken,
+}
+
+/// What [`RelyingParty::start_registration`] needs: whose passkey, from which session, and
+/// which passkeys the account already has.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RegistrationRequest<'a> {
+    /// The account; its id is the passkey's user handle.
+    pub user: UserId,
+    /// The account name the authenticator shows, usually the email address.
+    pub user_name: &'a str,
+    /// The display name the authenticator shows.
+    pub display_name: &'a str,
+    /// The setup or recent full session the request came from.
+    pub session: SessionId,
+    /// The account's passkeys, which the authenticator is asked not to register again.
+    pub existing: &'a [Passkey],
+}
+
+impl<'a> RegistrationRequest<'a> {
+    /// A registration for `user` from `session`, with no existing passkeys.
+    #[must_use]
+    pub fn new(
+        user: UserId,
+        user_name: &'a str,
+        display_name: &'a str,
+        session: SessionId,
+    ) -> Self {
+        Self {
+            user,
+            user_name,
+            display_name,
+            session,
+            existing: &[],
+        }
+    }
+
+    /// A registration for `account` (its address as the name) from `session`.
+    #[must_use]
+    pub fn for_account(account: &'a Account, session: SessionId) -> Self {
+        Self::new(
+            account.id,
+            account.email.as_str(),
+            &account.display_name,
+            session,
+        )
+    }
+
+    /// The account's passkeys, which the authenticator is asked not to register again.
+    #[must_use]
+    pub fn excluding(mut self, existing: &'a [Passkey]) -> Self {
+        self.existing = existing;
+        self
+    }
+}
+
 /// The relying party: the app's origin and passkey settings.
 #[derive(Debug)]
 pub struct RelyingParty {
@@ -186,40 +269,43 @@ impl RelyingParty {
     /// # Errors
     ///
     /// [`Error::Config`] when `rp_id` does not match `origin`.
-    pub fn from_parts(rp_id: &str, rp_name: &str, origin: &Url) -> Result<Self, Error> {
-        let webauthn = WebauthnBuilder::new(rp_id, origin)
+    pub fn from_parts(rp_id: &str, rp_name: &str, origin: &str) -> Result<Self, Error> {
+        let origin = Url::parse(origin).map_err(|_| Error::Config(ConfigReason::OriginNotUrl))?;
+        let webauthn = WebauthnBuilder::new(rp_id, &origin)
             .and_then(|builder| builder.rp_name(rp_name).build())
             .map_err(|_| Error::Config(ConfigReason::RpIdMismatch))?;
         Ok(Self { webauthn })
     }
 
-    /// Starts registering a passkey for `user`, from `session` (a setup session or a recent
-    /// full session: [`Access::Enrolling`](crate::session::Access::Enrolling)). `existing`
-    /// are the account's passkeys, which the authenticator is asked not to register again.
+    /// Starts registering a passkey, from a setup session or a recent full session
+    /// ([`Access::Enrolling`](crate::session::Access::Enrolling)). The request's `existing`
+    /// passkeys are ones the authenticator is asked not to register again.
     ///
     /// # Errors
     ///
     /// [`Error::Crypto`] when webauthn-rs fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_registration<R: CryptoRng + ?Sized>(
         &self,
-        user: UserId,
-        user_name: &str,
-        display_name: &str,
-        existing: &[Passkey],
-        session: SessionId,
+        request: RegistrationRequest<'_>,
         now: OffsetDateTime,
         rng: &mut R,
-    ) -> Result<(CreationChallengeResponse, Ceremony<PasskeyRegistration>), Error> {
+    ) -> Result<Started<CreationChallengeResponse, PasskeyRegistration>, Error> {
+        let RegistrationRequest {
+            user,
+            user_name,
+            display_name,
+            session,
+            existing,
+        } = request;
         let exclude = existing.iter().map(|key| key.cred_id().clone()).collect();
         let (challenge, state) = self
             .webauthn
             .start_passkey_registration(user.into_uuid(), user_name, display_name, Some(exclude))
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnRegistrationStart))?;
-        Ok((
+        Ok(Started {
             challenge,
-            ceremony(state, Binding::Session { session, user }, now, rng),
-        ))
+            ceremony: ceremony(state, Binding::Session { session, user }, now, rng),
+        })
     }
 
     /// Finishes a registration. Refuses a credential that is already among `existing` (the
@@ -261,7 +347,7 @@ impl RelyingParty {
         session: SessionId,
         now: OffsetDateTime,
         rng: &mut R,
-    ) -> Result<(RequestChallengeResponse, Ceremony<PasskeyAuthentication>), Error> {
+    ) -> Result<Started<RequestChallengeResponse, PasskeyAuthentication>, Error> {
         if passkeys.is_empty() {
             return Err(Error::InvalidRequest(InvalidRequestReason::NoPasskey));
         }
@@ -269,10 +355,10 @@ impl RelyingParty {
             .webauthn
             .start_passkey_authentication(passkeys)
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
-        Ok((
+        Ok(Started {
             challenge,
-            ceremony(state, Binding::Session { session, user }, now, rng),
-        ))
+            ceremony: ceremony(state, Binding::Session { session, user }, now, rng),
+        })
     }
 
     /// Finishes verifying. Then call [`record_use`].
@@ -306,21 +392,13 @@ impl RelyingParty {
     /// # Errors
     ///
     /// [`Error::InvalidRequest`] with `no_passkey`, or [`Error::Crypto`].
-    #[allow(clippy::type_complexity)]
     pub fn start_sign_in<R: CryptoRng + ?Sized>(
         &self,
         user: UserId,
         passkeys: &[Passkey],
         now: OffsetDateTime,
         rng: &mut R,
-    ) -> Result<
-        (
-            RequestChallengeResponse,
-            Ceremony<PasskeyAuthentication>,
-            SecretToken,
-        ),
-        Error,
-    > {
+    ) -> Result<SignInStarted<PasskeyAuthentication>, Error> {
         if passkeys.is_empty() {
             return Err(Error::InvalidRequest(InvalidRequestReason::NoPasskey));
         }
@@ -328,8 +406,7 @@ impl RelyingParty {
             .webauthn
             .start_passkey_authentication(passkeys)
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
-        let (ceremony, token) = browser_ceremony(state, Some(user), now, rng);
-        Ok((challenge, ceremony, token))
+        Ok(browser_ceremony(challenge, state, Some(user), now, rng))
     }
 
     /// Starts a passkey sign-in where the browser offers the user's discoverable passkeys.
@@ -339,25 +416,16 @@ impl RelyingParty {
     /// # Errors
     ///
     /// [`Error::Crypto`] when webauthn-rs fails.
-    #[allow(clippy::type_complexity)]
     pub fn start_discoverable<R: CryptoRng + ?Sized>(
         &self,
         now: OffsetDateTime,
         rng: &mut R,
-    ) -> Result<
-        (
-            RequestChallengeResponse,
-            Ceremony<DiscoverableAuthentication>,
-            SecretToken,
-        ),
-        Error,
-    > {
+    ) -> Result<SignInStarted<DiscoverableAuthentication>, Error> {
         let (challenge, state) = self
             .webauthn
             .start_discoverable_authentication()
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnDiscoverableStart))?;
-        let (ceremony, token) = browser_ceremony(state, None, now, rng);
-        Ok((challenge, ceremony, token))
+        Ok(browser_ceremony(challenge, state, None, now, rng))
     }
 
     /// The account a discoverable assertion claims, from its user handle. Load that
@@ -422,15 +490,20 @@ fn ceremony<S, R: CryptoRng + ?Sized>(
 }
 
 fn browser_ceremony<S, R: CryptoRng + ?Sized>(
+    challenge: RequestChallengeResponse,
     state: S,
     user: Option<UserId>,
     now: OffsetDateTime,
     rng: &mut R,
-) -> (Ceremony<S>, SecretToken) {
+) -> SignInStarted<S> {
     let issued = token::issue(rng);
     let binding = Binding::Browser {
         token_hash: issued.hash,
         user,
     };
-    (ceremony(state, binding, now, rng), issued.token)
+    SignInStarted {
+        challenge,
+        ceremony: ceremony(state, binding, now, rng),
+        binding_token: issued.token,
+    }
 }

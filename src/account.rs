@@ -16,7 +16,7 @@
 //! // UPDATE users SET failures = failures + 1 WHERE id = ? RETURNING failures  -> 5
 //! let locked_until = policy.locked_until(5, now);
 //! assert_eq!(locked_until, Some(now + time::Duration::minutes(5)));
-//! let lockout = Lockout { failures: 5, locked_until };
+//! let lockout = Lockout::new(5, locked_until);
 //! assert!(lockout.check(now).is_err());
 //! ```
 
@@ -151,6 +151,7 @@ impl std::str::FromStr for Role {
 /// Which factors an account has enrolled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Factors {
     /// A password is set.
     pub password: bool,
@@ -158,6 +159,18 @@ pub struct Factors {
     pub totp: bool,
     /// Number of passkeys.
     pub passkeys: usize,
+}
+
+impl Factors {
+    /// Whether a password is set, whether TOTP is enrolled, and how many passkeys.
+    #[must_use]
+    pub const fn new(password: bool, totp: bool, passkeys: usize) -> Self {
+        Self {
+            password,
+            totp,
+            passkeys,
+        }
+    }
 }
 
 impl Factors {
@@ -183,7 +196,7 @@ impl Factors {
     /// ```
     /// use latchkey::{Factors, PasswordOnly};
     ///
-    /// let password_only = Factors { password: true, totp: false, passkeys: 0 };
+    /// let password_only = Factors::new(true, false, 0);
     /// assert!(!password_only.are_sufficient(PasswordOnly::Refused));
     /// assert!(password_only.are_sufficient(PasswordOnly::AllowedUntilEnrolled));
     /// assert!(!Factors::default().are_sufficient(PasswordOnly::AllowedUntilEnrolled));
@@ -260,6 +273,7 @@ pub enum PasswordOnly {
 /// doubling up to `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct LockoutPolicy {
     /// Failures per lock; 0 turns the lockout off. Default 5.
     pub threshold: u32,
@@ -267,6 +281,19 @@ pub struct LockoutPolicy {
     pub base: Duration,
     /// The longest lock. Default 1 hour.
     pub max: Duration,
+}
+
+impl LockoutPolicy {
+    /// Every `threshold`-th consecutive failure locks, for `base` doubling up to `max`;
+    /// a `threshold` of 0 turns the lockout off.
+    #[must_use]
+    pub const fn new(threshold: u32, base: Duration, max: Duration) -> Self {
+        Self {
+            threshold,
+            base,
+            max,
+        }
+    }
 }
 
 impl Default for LockoutPolicy {
@@ -345,11 +372,23 @@ impl LockoutPolicy {
 /// An account's consecutive failures and lock: the app stores both.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Lockout {
     /// Consecutive failed attempts since the last completed sign-in.
     pub failures: u32,
     /// Locked until then.
     pub locked_until: Option<OffsetDateTime>,
+}
+
+impl Lockout {
+    /// A stored failure count and lock.
+    #[must_use]
+    pub const fn new(failures: u32, locked_until: Option<OffsetDateTime>) -> Self {
+        Self {
+            failures,
+            locked_until,
+        }
+    }
 }
 
 impl Lockout {
@@ -392,6 +431,7 @@ impl Lockout {
 /// The account as the flows see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Account {
     /// Its id.
     pub id: UserId,
@@ -409,9 +449,28 @@ pub struct Account {
     pub lockout: Lockout,
 }
 
+impl Account {
+    /// An account as the flows see it, from the app's row: inactive, the address as display
+    /// name, no factors and no failures until the app sets `active`, `display_name`,
+    /// `factors` and `lockout` from its row.
+    #[must_use]
+    pub fn new(id: UserId, email: Email, role: Role) -> Self {
+        Self {
+            id,
+            display_name: email.as_str().to_owned(),
+            email,
+            role,
+            active: false,
+            factors: Factors::default(),
+            lockout: Lockout::default(),
+        }
+    }
+}
+
 /// An account to create, from [`Invite`](crate::flow::invite::Invite) or for the owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct NewAccount {
     /// Its id.
     pub id: UserId,
@@ -423,6 +482,26 @@ pub struct NewAccount {
     pub role: Role,
     /// When it was created.
     pub created_at: OffsetDateTime,
+}
+
+impl NewAccount {
+    /// An account to create.
+    #[must_use]
+    pub fn new(
+        id: UserId,
+        email: Email,
+        display_name: String,
+        role: Role,
+        created_at: OffsetDateTime,
+    ) -> Self {
+        Self {
+            id,
+            email,
+            display_name,
+            role,
+            created_at,
+        }
+    }
 }
 
 impl NewAccount {

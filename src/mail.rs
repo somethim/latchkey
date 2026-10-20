@@ -7,13 +7,13 @@
 //! use latchkey::Email;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mail = Mail {
-//!     kind: MailKind::SignInLink,
-//!     to: Email::parse("owner@example.com")?,
-//!     link: "https://home.example.com/sign-in/link?token=abc".parse()?,
-//!     expires_at: Some(time::OffsetDateTime::from_unix_timestamp(1_800_000_900)?),
-//!     sign_in: None,
-//! };
+//! let mail = Mail::new(
+//!     MailKind::SignInLink,
+//!     Email::parse("owner@example.com")?,
+//!     "https://home.example.com/sign-in/link?token=abc",
+//!     Some(time::OffsetDateTime::from_unix_timestamp(1_800_000_900)?),
+//!     None,
+//! );
 //! assert_eq!(mail.subject(), "Your sign-in link");
 //! assert!(mail.text().contains("expires at 2027-01-15T08:15:00Z"));
 //! # Ok(())
@@ -21,7 +21,6 @@
 //! ```
 
 use time::OffsetDateTime;
-use url::Url;
 
 use crate::account::Email;
 use crate::session::SignInMethod;
@@ -45,6 +44,7 @@ pub enum MailKind {
 /// The details a new-device mail reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct SignInDetails {
     /// When the sign-in completed.
     pub at: OffsetDateTime,
@@ -54,10 +54,23 @@ pub struct SignInDetails {
     pub user_agent: Option<String>,
 }
 
+impl SignInDetails {
+    /// The details of a sign-in at `at` by `method` from `user_agent`.
+    #[must_use]
+    pub fn new(at: OffsetDateTime, method: SignInMethod, user_agent: Option<String>) -> Self {
+        Self {
+            at,
+            method,
+            user_agent,
+        }
+    }
+}
+
 /// A mail to send. For link mails, `link` carries the token in its query string: it is a
 /// bearer secret, so `Debug` leaves the link out.
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Mail {
     /// Which mail.
     pub kind: MailKind,
@@ -65,7 +78,7 @@ pub struct Mail {
     pub to: Email,
     /// The page that redeems the token (`?token=`), or for [`MailKind::NewDevice`] the
     /// sessions page.
-    pub link: Url,
+    pub link: String,
     /// When the link stops working; `None` for notifications.
     pub expires_at: Option<OffsetDateTime>,
     /// Set for [`MailKind::NewDevice`].
@@ -95,6 +108,25 @@ fn printable(raw: &str) -> String {
 }
 
 impl Mail {
+    /// A mail, for an app that builds its own (latchkey's come in
+    /// [`Effect::SendMail`](crate::flow::Effect::SendMail)).
+    #[must_use]
+    pub fn new(
+        kind: MailKind,
+        to: Email,
+        link: impl Into<String>,
+        expires_at: Option<OffsetDateTime>,
+        sign_in: Option<SignInDetails>,
+    ) -> Self {
+        Self {
+            kind,
+            to,
+            link: link.into(),
+            expires_at,
+            sign_in,
+        }
+    }
+
     /// The subject line.
     #[must_use]
     pub fn subject(&self) -> &'static str {
@@ -126,7 +158,8 @@ impl Mail {
     /// The token in the link, if any; for tests.
     #[must_use]
     pub fn link_token(&self) -> Option<String> {
-        self.link
+        url::Url::parse(&self.link)
+            .ok()?
             .query_pairs()
             .find(|(key, _)| key == "token")
             .map(|(_, value)| value.into_owned())
@@ -165,7 +198,7 @@ mod tests {
         let mail = Mail {
             kind: MailKind::NewDevice,
             to: Email::parse("o@example.com")?,
-            link: Url::parse("https://home.example.com/settings/sessions")?,
+            link: "https://home.example.com/settings/sessions".to_owned(),
             expires_at: None,
             sign_in: Some(SignInDetails {
                 at: OffsetDateTime::from_unix_timestamp(1_900_000_000)?,
@@ -187,7 +220,7 @@ mod tests {
         let mail = Mail {
             kind: MailKind::SignInLink,
             to: Email::parse("o@example.com")?,
-            link: Url::parse("https://home.example.com/sign-in/link?token=SECRET")?,
+            link: "https://home.example.com/sign-in/link?token=SECRET".to_owned(),
             expires_at: Some(OffsetDateTime::from_unix_timestamp(1_900_000_000)?),
             sign_in: None,
         };

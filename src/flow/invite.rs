@@ -24,6 +24,7 @@ pub const MAX_NAME_LEN: usize = 100;
 // matching on them.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Invite {
     /// Nothing yet.
     Start,

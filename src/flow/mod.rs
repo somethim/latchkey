@@ -80,6 +80,7 @@ impl LinkKind {
 /// which checks the kind and expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct LinkToken {
     /// What it is for.
     pub kind: LinkKind,
@@ -92,6 +93,24 @@ pub struct LinkToken {
 }
 
 impl LinkToken {
+    /// A link record read back from storage.
+    #[must_use]
+    pub const fn new(
+        kind: LinkKind,
+        user_id: UserId,
+        created_at: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Self {
+        Self {
+            kind,
+            user_id,
+            created_at,
+            expires_at,
+        }
+    }
+}
+
+impl LinkToken {
     /// Whether it can be redeemed as `kind` at `now`.
     #[must_use]
     pub fn is_redeemable(&self, kind: LinkKind, now: OffsetDateTime) -> bool {
@@ -101,6 +120,7 @@ impl LinkToken {
 
 /// What the app knows about the client making the request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Client {
     /// The client IP as an [`IpTag`].
     pub ip_tag: Option<IpTag>,
@@ -115,8 +135,31 @@ pub struct Client {
     pub device_known: bool,
 }
 
+impl Client {
+    /// A client with this IP tag and user agent, and no device cookie.
+    #[must_use]
+    pub fn new(ip_tag: Option<IpTag>, user_agent: Option<String>) -> Self {
+        Self {
+            ip_tag,
+            user_agent,
+            device_cookie: None,
+            device_known: false,
+        }
+    }
+
+    /// The device cookie the client presented, and whether its hash is remembered for the
+    /// account this request signs in.
+    #[must_use]
+    pub fn with_device_cookie(mut self, cookie: Option<SecretToken>, known: bool) -> Self {
+        self.device_known = known && cookie.is_some();
+        self.device_cookie = cookie;
+        self
+    }
+}
+
 /// The TOTP material for checking a code.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TotpMaterial {
     /// The confirmed secret (opened with [`DataKey::open_totp`](crate::seal::DataKey::open_totp)).
     pub secret: TotpSecret,
@@ -124,13 +167,36 @@ pub struct TotpMaterial {
     pub last_used_step: Option<TotpStep>,
 }
 
+impl TotpMaterial {
+    /// The confirmed secret and the last step accepted.
+    #[must_use]
+    pub fn new(secret: TotpSecret, last_used_step: Option<TotpStep>) -> Self {
+        Self {
+            secret,
+            last_used_step,
+        }
+    }
+}
+
 /// What a TOTP or recovery code is checked against.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CodeMaterial {
     /// The account's TOTP, if enrolled.
     pub totp: Option<TotpMaterial>,
     /// The hashes of the account's unused recovery codes.
     pub recovery_codes: Vec<RecoveryCodeHash>,
+}
+
+impl CodeMaterial {
+    /// The account's TOTP, if enrolled, and the hashes of its unused recovery codes.
+    #[must_use]
+    pub fn new(totp: Option<TotpMaterial>, recovery_codes: Vec<RecoveryCodeHash>) -> Self {
+        Self {
+            totp,
+            recovery_codes,
+        }
+    }
 }
 
 /// Which code matched.
@@ -294,6 +360,7 @@ pub enum Effect {
 /// A flow moved on: the new state and what to do.
 #[derive(Debug)]
 #[must_use = "the effects of a transition must be carried out"]
+#[non_exhaustive]
 pub struct Transition<S> {
     /// The new state.
     pub state: S,
@@ -301,11 +368,19 @@ pub struct Transition<S> {
     pub effects: Vec<Effect>,
 }
 
+impl<S> Transition<S> {
+    /// A new state and its effects, for an app's own flow steps and tests.
+    pub fn new(state: S, effects: Vec<Effect>) -> Self {
+        Self { state, effects }
+    }
+}
+
 /// A flow refused an event: the error to answer with, and what must still be done (such as
 /// counting the failure).
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 #[must_use = "the effects of a refusal must still be carried out"]
+#[non_exhaustive]
 pub struct Refusal {
     /// The answer for the client.
     #[source]
@@ -324,7 +399,9 @@ impl From<Error> for Refusal {
 }
 
 impl Refusal {
-    fn with(error: Error, effects: Vec<Effect>) -> Self {
+    /// An error and the effects that must still happen, for an app's own flow steps and
+    /// tests.
+    pub fn new(error: Error, effects: Vec<Effect>) -> Self {
         Self { error, effects }
     }
 }
@@ -448,7 +525,7 @@ fn recognise_device<R: CryptoRng + ?Sized>(
         effects.push(Effect::SendMail(Mail {
             kind: MailKind::NewDevice,
             to: account.email.clone(),
-            link: config.sessions_url().clone(),
+            link: config.sessions_url().to_owned(),
             expires_at: None,
             sign_in: Some(SignInDetails {
                 at: now,
@@ -497,19 +574,19 @@ fn send_link<R: CryptoRng + ?Sized>(
     let (ttl, mut link, mail_kind, audit_kind) = match kind {
         LinkKind::Setup => (
             config.link_ttl(),
-            config.setup_url().clone(),
+            config.setup_target().clone(),
             MailKind::Setup,
             AuditKind::SetupLinkSent,
         ),
         LinkKind::SignIn => (
             config.link_ttl(),
-            config.sign_in_link_url().clone(),
+            config.sign_in_link_target().clone(),
             MailKind::SignInLink,
             AuditKind::SignInLinkSent,
         ),
         LinkKind::Invite => (
             config.invite_ttl(),
-            config.invite_url().clone(),
+            config.invite_target().clone(),
             MailKind::Invite,
             AuditKind::InviteSent,
         ),
@@ -531,7 +608,7 @@ fn send_link<R: CryptoRng + ?Sized>(
         Effect::SendMail(Mail {
             kind: mail_kind,
             to: account.email.clone(),
-            link,
+            link: link.into(),
             expires_at: Some(expires_at),
             sign_in: None,
         }),

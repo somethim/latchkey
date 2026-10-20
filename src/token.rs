@@ -185,6 +185,7 @@ impl std::fmt::Debug for SecretToken {
 /// A freshly issued token and the hash to store for it.
 #[derive(Debug, Clone)]
 #[must_use = "a token is useless unless its hash is stored and the token handed out"]
+#[non_exhaustive]
 pub struct IssuedToken {
     /// For the client.
     pub token: SecretToken,

@@ -97,6 +97,7 @@ impl std::fmt::Display for AuditKind {
 /// An event to append to the audit log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct AuditEvent {
     /// When.
     pub at: OffsetDateTime,

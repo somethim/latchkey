@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use latchkey::account::{Account, Email, Factors, Lockout, Role};
+use latchkey::account::{Account, Email, Factors, Role};
 use latchkey::flow::email_link::{EmailLink, EmailLinkEvent};
 use latchkey::flow::{Client, Effect, LinkToken};
 use latchkey::token::TokenHash;
@@ -15,19 +15,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
     let mut rng = latchkey::os_rng()?;
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
-    let account = Account {
-        id: UserId::random(&mut rng),
-        email: Email::parse("owner@example.com")?,
-        display_name: "Owner".into(),
-        role: Role::Owner,
-        active: true,
-        factors: Factors {
-            password: true,
-            totp: true,
-            passkeys: 0,
-        },
-        lockout: Lockout::default(),
-    };
+    let mut account = Account::new(
+        UserId::random(&mut rng),
+        Email::parse("owner@example.com")?,
+        Role::Owner,
+    );
+    account.display_name = "Owner".into();
+    account.active = true;
+    account.factors = Factors::new(true, true, 0);
     let mut links: HashMap<TokenHash, LinkToken> = HashMap::new();
     let mut outbox = Vec::new();
 

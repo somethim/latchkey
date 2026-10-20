@@ -9,7 +9,7 @@
 //!     .build()?;
 //! assert_eq!(config.rp_id(), "home.example.com");
 //! assert_eq!(config.origin_string(), "https://home.example.com");
-//! assert_eq!(config.setup_url().as_str(), "https://home.example.com/setup");
+//! assert_eq!(config.setup_url(), "https://home.example.com/setup");
 //! # Ok::<(), latchkey::Error>(())
 //! ```
 
@@ -379,8 +379,8 @@ impl Config {
 
     /// The origin.
     #[must_use]
-    pub fn origin(&self) -> &Url {
-        &self.origin
+    pub fn origin(&self) -> &str {
+        self.origin.as_str()
     }
 
     /// The origin as browsers send it in `Origin`, e.g. `https://home.example.com`.
@@ -440,26 +440,38 @@ impl Config {
 
     /// Where setup links point.
     #[must_use]
-    pub fn setup_url(&self) -> &Url {
+    pub fn setup_url(&self) -> &str {
+        self.setup_url.as_str()
+    }
+
+    pub(crate) fn setup_target(&self) -> &Url {
         &self.setup_url
     }
 
     /// Where sign-in links point.
     #[must_use]
-    pub fn sign_in_link_url(&self) -> &Url {
+    pub fn sign_in_link_url(&self) -> &str {
+        self.sign_in_link_url.as_str()
+    }
+
+    pub(crate) fn sign_in_link_target(&self) -> &Url {
         &self.sign_in_link_url
     }
 
     /// Where invite links point.
     #[must_use]
-    pub fn invite_url(&self) -> &Url {
+    pub fn invite_url(&self) -> &str {
+        self.invite_url.as_str()
+    }
+
+    pub(crate) fn invite_target(&self) -> &Url {
         &self.invite_url
     }
 
     /// The sessions page the new-device mail links to.
     #[must_use]
-    pub fn sessions_url(&self) -> &Url {
-        &self.sessions_url
+    pub fn sessions_url(&self) -> &str {
+        self.sessions_url.as_str()
     }
 
     /// The lockout policy.
@@ -512,10 +524,7 @@ mod tests {
         assert_eq!(config.session_ttl(), Duration::days(30));
         assert_eq!(config.step_up_window(), Duration::minutes(5));
         assert_eq!(config.link_ttl(), Duration::minutes(15));
-        assert_eq!(
-            config.invite_url().as_str(),
-            "https://home.example.com/invite"
-        );
+        assert_eq!(config.invite_url(), "https://home.example.com/invite");
         assert_eq!(config.owner_name(), "o@example.com");
         assert_eq!(config.rp_name(), "home.example.com");
         assert_eq!(config.step_up_failures(), StepUpFailures::AccountLockout);

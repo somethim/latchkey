@@ -112,6 +112,7 @@ impl std::fmt::Debug for RecoveryCode {
 /// A fresh set of codes: show `codes` once, store `hashes` (replacing any earlier set).
 #[derive(Debug, Clone)]
 #[must_use = "recovery codes must be stored and shown"]
+#[non_exhaustive]
 pub struct RecoveryCodes {
     /// For the user, once.
     pub codes: Vec<RecoveryCode>,

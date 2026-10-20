@@ -147,19 +147,16 @@ impl App {
     pub fn account(&self, id: UserId) -> Option<Account> {
         let row = self.rows.get(&id)?;
         let new = row.new.as_ref()?;
-        Some(Account {
-            id,
-            email: new.email.clone(),
-            display_name: new.display_name.clone(),
-            role: new.role,
-            active: row.active,
-            factors: Factors {
-                password: row.password.is_some(),
-                totp: row.totp.is_some(),
-                passkeys: row.passkeys.len(),
-            },
-            lockout: row.lockout,
-        })
+        let mut account = Account::new(id, new.email.clone(), new.role);
+        account.display_name.clone_from(&new.display_name);
+        account.active = row.active;
+        account.factors = Factors::new(
+            row.password.is_some(),
+            row.totp.is_some(),
+            row.passkeys.len(),
+        );
+        account.lockout = row.lockout;
+        Some(account)
     }
 
     pub fn account_by_email(&self, email: &str) -> Option<Account> {
@@ -173,28 +170,25 @@ impl App {
             (Some(user), Some(hash)) => self.devices.contains(&(user, hash)),
             _ => false,
         };
-        Client {
-            ip_tag: None,
-            user_agent: browser.user_agent.clone(),
-            device_cookie,
-            device_known,
-        }
+        Client::new(None, browser.user_agent.clone())
+            .with_device_cookie(device_cookie, device_known)
     }
 
     pub fn material(&self, user: UserId) -> CodeMaterial {
         let row = &self.rows[&user];
-        CodeMaterial {
-            totp: row.totp.as_ref().map(|sealed| TotpMaterial {
-                secret: self.data_key.open_totp(user, sealed).unwrap(),
-                last_used_step: row.last_step,
+        CodeMaterial::new(
+            row.totp.as_ref().map(|sealed| {
+                TotpMaterial::new(
+                    self.data_key.open_totp(user, sealed).unwrap(),
+                    row.last_step,
+                )
             }),
-            recovery_codes: row
-                .recovery
+            row.recovery
                 .iter()
                 .filter(|(_, used)| !used)
                 .map(|(hash, _)| *hash)
                 .collect(),
-        }
+        )
     }
 
     pub fn session_of(&self, browser: &Browser) -> Option<Session> {

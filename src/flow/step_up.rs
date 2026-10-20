@@ -82,6 +82,7 @@ impl StepUpFailures {
 // matching on them.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StepUp {
     /// A signed-in session asks to step up.
     Start {
@@ -277,7 +278,7 @@ fn spent(
         .step_up_failures()
         .ends_session(session.step_up_failures)
     {
-        return Err(Refusal::with(
+        return Err(Refusal::new(
             Error::SessionEnded,
             end_session(config, session, client, now),
         ));
@@ -313,7 +314,7 @@ fn wrong_guess(
                 });
             }
             effects.extend(failure(account, detail, client, now));
-            Refusal::with(Error::SignInFailed, effects)
+            Refusal::new(Error::SignInFailed, effects)
         }
         policy @ StepUpFailures::PerSession { .. } => {
             let mut effects = vec![
@@ -327,9 +328,9 @@ fn wrong_guess(
             ];
             if policy.ends_session(session.step_up_failures.saturating_add(1)) {
                 effects.extend(end_session(config, session, client, now));
-                return Refusal::with(Error::SessionEnded, effects);
+                return Refusal::new(Error::SessionEnded, effects);
             }
-            Refusal::with(Error::SignInFailed, effects)
+            Refusal::new(Error::SignInFailed, effects)
         }
     }
 }

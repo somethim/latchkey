@@ -38,6 +38,7 @@ use crate::session::{Access, Session, SignInMethod, Stage};
 // matching on them.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SignIn {
     /// Nothing yet.
     Start,
@@ -177,11 +178,11 @@ impl SignIn {
                     effects.push(Effect::RecordWrongPassword { key });
                 }
                 let Some(account) = account else {
-                    return Err(Refusal::with(Error::SignInFailed, effects));
+                    return Err(Refusal::new(Error::SignInFailed, effects));
                 };
                 if !matched {
                     effects.extend(failure(&account, "password", &client, now));
-                    return Err(Refusal::with(Error::SignInFailed, effects));
+                    return Err(Refusal::new(Error::SignInFailed, effects));
                 }
                 if account.factors.password_suffices(config.password_only()) {
                     let (session, done) = complete_sign_in(
@@ -226,7 +227,7 @@ impl SignIn {
                 second_factor_allowed(config, &account, &session, now)?;
                 let Some(matched) = check_code(&code, &material, now) else {
                     let effects = failure(&account, "code", &client, now);
-                    return Err(Refusal::with(Error::SignInFailed, effects));
+                    return Err(Refusal::new(Error::SignInFailed, effects));
                 };
                 let method = match matched {
                     super::CodeMatch::Totp(_) => SignInMethod::PasswordTotp,

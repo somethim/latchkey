@@ -21,6 +21,7 @@ use crate::session::{Session, SignInMethod};
 // matching on them.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EmailLink {
     /// Nothing yet.
     Start,

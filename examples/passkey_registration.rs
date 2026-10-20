@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use latchkey::passkey::{RelyingParty, record_use};
+use latchkey::passkey::{RegistrationRequest, RelyingParty, Started, record_use};
 use latchkey::seal::DataKey;
 use latchkey::{CeremonyId, Config, PasskeyId, SessionId, UserId};
 use time::OffsetDateTime;
@@ -26,15 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // POST /passkeys/register/start: store the ceremony server-side, send its id + challenge.
     let mut ceremonies = HashMap::new();
-    let (challenge, ceremony) = rp.start_registration(
-        user,
-        "owner@example.com",
-        "Owner",
-        &[],
-        session,
-        now,
-        &mut rng,
-    )?;
+    let request = RegistrationRequest::new(user, "owner@example.com", "Owner", session);
+    let Started {
+        challenge,
+        ceremony,
+        ..
+    } = rp.start_registration(request, now, &mut rng)?;
     let ceremony_id: CeremonyId = ceremony.id();
     ceremonies.insert(ceremony_id, serde_json::to_string(&ceremony)?);
     println!(
@@ -58,7 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Later: verify it as a second factor or for a step-up.
     let mut passkeys = vec![data_key.open_passkey(user, passkey_id, &sealed)?];
-    let (challenge, ceremony) = rp.start_authentication(user, &passkeys, session, now, &mut rng)?;
+    let Started {
+        challenge,
+        ceremony,
+        ..
+    } = rp.start_authentication(user, &passkeys, session, now, &mut rng)?;
     let assertion = browser.do_authentication(origin, challenge)?;
     let state = ceremony.into_state(session, user, now)?;
     let result = rp.finish_authentication(&assertion, &state)?;

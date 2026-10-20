@@ -512,10 +512,11 @@ fn ten_wrong_passwords_in_fifteen_minutes_throttle_the_account() {
     let mut app = App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
             .password_params(common::cheap())
-            .lockout(LockoutPolicy {
-                threshold: 0,
-                ..LockoutPolicy::default()
-            }),
+            .lockout(LockoutPolicy::new(
+                0,
+                Duration::minutes(5),
+                Duration::hours(1),
+            )),
     );
     let mut browser = Browser::default();
     let (secret, _) = app.setup_owner(&mut browser);
@@ -557,10 +558,7 @@ fn a_successful_sign_in_does_not_reset_the_throttle() {
     let mut app = App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
             .password_params(common::cheap())
-            .rate_limits(RateLimits {
-                wrong_passwords_per_account: 3,
-                ..RateLimits::default()
-            }),
+            .rate_limits(RateLimits::new(30, 10, 3, Duration::minutes(15))),
     );
     let mut browser = Browser::default();
     let (secret, _) = app.setup_owner(&mut browser);
@@ -1008,7 +1006,7 @@ fn invite(
             app.apply(step.effects, &mut Browser::default())?;
             match step.state {
                 Invite::Sent { account } => Ok(account),
-                Invite::Start => unreachable!(),
+                _ => unreachable!(),
             }
         }
         Err(refusal) => Err(app.refused(refusal, &mut Browser::default())),

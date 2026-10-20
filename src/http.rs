@@ -5,12 +5,12 @@
 //! ```
 //! use latchkey::http::{self, RequestHeaders};
 //!
-//! let headers = RequestHeaders {
-//!     method: "POST",
-//!     origin: Some("https://home.example.com"),
-//!     sec_fetch_site: None,
-//!     csrf_token: Some("token-from-the-session"),
-//! };
+//! let headers = RequestHeaders::new(
+//!     "POST",
+//!     Some("https://home.example.com"),
+//!     None,
+//!     Some("token-from-the-session"),
+//! );
 //! assert!(headers.check_origin("https://home.example.com").is_ok());
 //! assert!(headers.check_origin("https://evil.example").is_err());
 //!
@@ -231,6 +231,7 @@ pub fn is_unsafe_method(method: &str) -> bool {
 
 /// The headers the Origin and CSRF checks read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestHeaders<'a> {
     /// The request method, such as `POST`.
     pub method: &'a str,
@@ -240,6 +241,24 @@ pub struct RequestHeaders<'a> {
     pub sec_fetch_site: Option<&'a str>,
     /// The [`CSRF_HEADER`] header.
     pub csrf_token: Option<&'a str>,
+}
+
+impl<'a> RequestHeaders<'a> {
+    /// The request method and the `Origin`, `Sec-Fetch-Site` and [`CSRF_HEADER`] headers.
+    #[must_use]
+    pub const fn new(
+        method: &'a str,
+        origin: Option<&'a str>,
+        sec_fetch_site: Option<&'a str>,
+        csrf_token: Option<&'a str>,
+    ) -> Self {
+        Self {
+            method,
+            origin,
+            sec_fetch_site,
+            csrf_token,
+        }
+    }
 }
 
 impl RequestHeaders<'_> {

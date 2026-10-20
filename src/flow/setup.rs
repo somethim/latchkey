@@ -32,6 +32,7 @@ use crate::session::{Access, Session, SignInMethod, Stage};
 // matching on them.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Setup {
     /// Nothing yet.
     Start,

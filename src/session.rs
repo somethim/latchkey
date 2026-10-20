@@ -205,6 +205,7 @@ impl std::fmt::Display for SignInMethod {
 /// A session as the app stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct Session {
     /// For listing and revoking; not a secret.
     pub id: SessionId,
@@ -236,6 +237,37 @@ pub struct Session {
     /// otherwise.
     #[cfg_attr(feature = "serde", serde(default))]
     pub step_up_failures: u32,
+}
+
+impl Session {
+    /// A session read back from storage, or built by hand in tests: the fields every session
+    /// has. Set the others (`method`, `authenticated_at`, `ip_tag`, `user_agent`,
+    /// `step_up_failures`) on the result; they start as `None` and 0.
+    #[must_use]
+    pub fn new(
+        id: SessionId,
+        token_hash: TokenHash,
+        user_id: UserId,
+        stage: Stage,
+        csrf_token: SecretToken,
+        created_at: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Self {
+        Self {
+            id,
+            token_hash,
+            user_id,
+            stage,
+            csrf_token,
+            method: None,
+            created_at,
+            expires_at,
+            authenticated_at: None,
+            ip_tag: None,
+            user_agent: None,
+            step_up_failures: 0,
+        }
+    }
 }
 
 /// What a request needs from its session.
