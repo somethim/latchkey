@@ -1278,3 +1278,43 @@ fn once_a_second_factor_is_enrolled_it_is_required_again() {
         Some(Error::SignInFailed)
     );
 }
+
+// ---- plain-HTTP development cookies ----
+
+#[test]
+fn development_on_localhost_sets_cookies_without_secure() {
+    let mut app = App::with_config(
+        latchkey::Config::builder(OWNER, "http://localhost:3000")
+            .password(common::cheap())
+            .danger_insecure_localhost_cookies(),
+    );
+    let mut owner = app.account(app.owner_id()).unwrap();
+    owner.active = true;
+    owner.factors.password = true;
+    owner.factors.totp = true;
+    let issued = flow::issue_session(
+        &app.config,
+        &owner,
+        AppMethod::new("desktop_bridge").unwrap(),
+        &latchkey::flow::Client::default(),
+        app.now,
+        &mut app.rng,
+    )
+    .unwrap();
+    let headers: Vec<String> = issued
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            flow::Effect::SetCookie(cookie) => Some(cookie.header_value()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers.len(), 2, "session and device cookies");
+    assert!(headers[0].starts_with("latchkey="));
+    assert!(headers[1].starts_with("latchkey_device="));
+    for header in &headers {
+        assert!(!header.contains("Secure"), "{header}");
+        assert!(!header.contains("__Host-"), "{header}");
+        assert!(header.ends_with("; HttpOnly; SameSite=Lax"), "{header}");
+    }
+}

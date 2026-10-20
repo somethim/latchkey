@@ -47,6 +47,7 @@ pub struct Config {
     password_only: PasswordOnly,
     rate_limits: RateLimits,
     password: PasswordParams,
+    insecure_localhost_cookies: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,7 @@ pub struct ConfigBuilder {
     password_only: PasswordOnly,
     rate_limits: RateLimits,
     password: PasswordParams,
+    insecure_localhost_cookies: bool,
 }
 
 macro_rules! durations {
@@ -228,6 +230,35 @@ impl ConfigBuilder {
         self
     }
 
+    /// **Development only.** Cookies for a plain-HTTP origin on this machine: the cookie names
+    /// lose their `__Host-` prefix (browsers refuse `__Host-` cookies without `Secure`) and
+    /// [`SetCookie`](crate::http::SetCookie) leaves out `Secure`, so browsers that do not
+    /// treat `http://localhost` as secure (Safari) keep the cookies.
+    ///
+    /// [`build`](Self::build) refuses this unless the origin is `http://localhost`,
+    /// `http://127.0.0.1` or `http://[::1]` (any port), so a production config, which needs
+    /// an `https` origin, cannot have it. Never derive the origin from a request.
+    ///
+    /// ```
+    /// use latchkey::Config;
+    ///
+    /// let dev = Config::builder("owner@example.com", "http://localhost:3000")
+    ///     .danger_insecure_localhost_cookies()
+    ///     .build()?;
+    /// assert_eq!(dev.cookie_name().as_str(), "latchkey");
+    /// assert!(!dev.cookie_name().is_secure());
+    ///
+    /// let prod = Config::builder("owner@example.com", "https://home.example.com")
+    ///     .danger_insecure_localhost_cookies()
+    ///     .build();
+    /// assert!(prod.is_err());
+    /// # Ok::<(), latchkey::Error>(())
+    /// ```
+    pub fn danger_insecure_localhost_cookies(mut self) -> Self {
+        self.insecure_localhost_cookies = true;
+        self
+    }
+
     /// The rate limits and wrong-password throttle.
     pub fn rate_limits(mut self, rate_limits: RateLimits) -> Self {
         self.rate_limits = rate_limits;
@@ -244,7 +275,8 @@ impl ConfigBuilder {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when the origin is not an `https` URL (or `http://localhost`), the
+    /// [`Error::Config`] when the origin is not an `https` URL (or `http://` on `localhost`,
+    /// `127.0.0.1` or `[::1]`), insecure localhost cookies are asked for any other origin, the
     /// owner address or a cookie name is invalid, two cookie names are equal, or a path does
     /// not join onto the origin, or a [`StepUpFailures::PerSession`] limit is 0.
     /// [`Error::InvalidRequest`] with `email` for a bad owner
@@ -255,15 +287,28 @@ impl ConfigBuilder {
             .host_str()
             .ok_or(Error::Config("origin has no host"))?
             .to_owned();
-        let local = host == "localhost";
-        if origin.scheme() != "https" && !local {
+        let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+        let plain_local = origin.scheme() == "http" && local;
+        if origin.scheme() != "https" && !plain_local {
             return Err(Error::Config("origin must be https"));
+        }
+        if self.insecure_localhost_cookies && !plain_local {
+            return Err(Error::Config(
+                "insecure localhost cookies need an http://localhost, http://127.0.0.1 or http://[::1] origin",
+            ));
         }
         let owner_email =
             Email::parse(&self.owner_email).map_err(|_| Error::Config("owner email"))?;
-        let cookie_name = CookieName::new(&self.cookie_name)?;
-        let device_cookie_name = CookieName::new(&self.device_cookie_name)?;
-        let ceremony_cookie_name = CookieName::new(&self.ceremony_cookie_name)?;
+        let cookie = |name: &str| {
+            if self.insecure_localhost_cookies {
+                CookieName::insecure_localhost(name)
+            } else {
+                CookieName::new(name)
+            }
+        };
+        let cookie_name = cookie(&self.cookie_name)?;
+        let device_cookie_name = cookie(&self.device_cookie_name)?;
+        let ceremony_cookie_name = cookie(&self.ceremony_cookie_name)?;
         if cookie_name == device_cookie_name
             || cookie_name == ceremony_cookie_name
             || device_cookie_name == ceremony_cookie_name
@@ -302,6 +347,7 @@ impl ConfigBuilder {
             password_only: self.password_only,
             rate_limits: self.rate_limits,
             password: self.password,
+            insecure_localhost_cookies: self.insecure_localhost_cookies,
         })
     }
 }
@@ -329,6 +375,7 @@ impl Config {
             password_only: PasswordOnly::default(),
             rate_limits: RateLimits::default(),
             password: PasswordParams::default(),
+            insecure_localhost_cookies: false,
         }
     }
 
@@ -378,6 +425,13 @@ impl Config {
     #[must_use]
     pub fn device_cookie_name(&self) -> &CookieName {
         &self.device_cookie_name
+    }
+
+    /// Whether it was built with
+    /// [`danger_insecure_localhost_cookies`](ConfigBuilder::danger_insecure_localhost_cookies).
+    #[must_use]
+    pub fn insecure_localhost_cookies(&self) -> bool {
+        self.insecure_localhost_cookies
     }
 
     /// The passkey sign-in binding cookie's name.
@@ -522,6 +576,83 @@ mod tests {
                 .step_up_failures(StepUpFailures::PerSession { limit: 5 })
                 .build()
                 .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod insecure_localhost_tests {
+    use super::*;
+
+    fn dev(origin: &str) -> Result<Config, Error> {
+        Config::builder("o@example.com", origin)
+            .danger_insecure_localhost_cookies()
+            .build()
+    }
+
+    #[test]
+    fn insecure_cookies_only_for_plain_http_on_this_machine() -> Result<(), Error> {
+        for origin in [
+            "http://localhost",
+            "http://localhost:3000",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let config = dev(origin)?;
+            assert!(config.insecure_localhost_cookies(), "{origin}");
+            assert_eq!(config.cookie_name().as_str(), "latchkey");
+            assert_eq!(config.device_cookie_name().as_str(), "latchkey_device");
+            assert_eq!(config.ceremony_cookie_name().as_str(), "latchkey_ceremony");
+            assert!(!config.cookie_name().is_secure());
+        }
+        let refused = Some(Error::Config(
+            "insecure localhost cookies need an http://localhost, http://127.0.0.1 or http://[::1] origin",
+        ));
+        for origin in [
+            "https://home.example.com",
+            "https://localhost:3000",
+            "https://127.0.0.1",
+        ] {
+            assert_eq!(dev(origin).err(), refused, "{origin}");
+        }
+        for origin in [
+            "http://home.example.com",
+            "http://localhost.example.com",
+            "http://127.0.0.2",
+            "http://10.0.0.1",
+        ] {
+            assert_eq!(
+                dev(origin).err(),
+                Some(Error::Config("origin must be https")),
+                "{origin}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn by_default_cookies_are_host_only_and_secure_even_on_localhost() -> Result<(), Error> {
+        let config = Config::builder("o@example.com", "http://127.0.0.1:3000").build()?;
+        assert!(!config.insecure_localhost_cookies());
+        assert_eq!(config.cookie_name().as_str(), "__Host-latchkey");
+        assert!(config.cookie_name().is_secure());
+        Ok(())
+    }
+
+    #[test]
+    fn insecure_names_still_differ_and_stay_valid() {
+        let builder = || {
+            Config::builder("o@example.com", "http://localhost:3000")
+                .danger_insecure_localhost_cookies()
+        };
+        assert!(builder().device_cookie_name("latchkey").build().is_err());
+        assert!(builder().cookie_name("__Host-").build().is_err());
+        assert_eq!(
+            builder()
+                .cookie_name("__Host-app")
+                .build()
+                .map(|config| config.cookie_name().as_str().to_owned()),
+            Ok("app".to_owned())
         );
     }
 }

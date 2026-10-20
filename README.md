@@ -25,7 +25,7 @@ audit trail, now as pure functions and state machines.
 | `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
 | `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, `TokenHash::of_foreign` for tokens another system issued, constant-time compare |
 | `seal` | `DataKey`: AES-256-GCM with associated data per owner and kind, compatible with 0.2's stored values |
-| `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
+| `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`; a development mode for plain-HTTP localhost), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
 | `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
 | `limits` | `RateLimiter` (fixed windows), `WrongPasswordThrottle` (sliding window), and their per-key states |
 | `session` | `Session` records (with their step-up failure count), `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
@@ -151,6 +151,22 @@ let result = rp.finish_authentication(&credential, &state)?;
 ```
 
 Only the browser holding the cookie can finish the ceremony it started.
+
+### Plain-HTTP development on localhost
+
+Cookies are `__Host-` and `Secure`. Chrome and Firefox keep such cookies on
+`http://localhost`, Safari does not. For local development over plain HTTP:
+
+```rust,ignore
+let config = Config::builder("owner@example.com", "http://localhost:3000")
+    .danger_insecure_localhost_cookies()
+    .build()?;
+assert_eq!(config.cookie_name().as_str(), "latchkey"); // no __Host-, no Secure
+```
+
+`build` refuses this for any origin other than `http://localhost`, `http://127.0.0.1` or
+`http://[::1]`, and a production origin must be `https`, so it cannot reach production by
+accident. Read cookies by `config.cookie_name().as_str()`, not a hard-coded name.
 
 ## Example: password + TOTP with your own storage
 

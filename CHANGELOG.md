@@ -42,6 +42,10 @@ All notable changes to this crate are documented here. The format follows
   printable ASCII, `token::FOREIGN_MIN_LEN` / `FOREIGN_MAX_LEN`) the same way as its own, for
   porting sessions, links or API keys from another system; its documentation says which
   stored forms carry over.
+- `ConfigBuilder::danger_insecure_localhost_cookies` for plain-HTTP development: cookie
+  names lose their `__Host-` prefix and cookies are sent without `Secure`. `build` refuses
+  it unless the origin is `http://localhost`, `http://127.0.0.1` or `http://[::1]`.
+  `Config::insecure_localhost_cookies` and `CookieName::is_secure` report it.
 
 ### Changed
 
@@ -58,6 +62,7 @@ All notable changes to this crate are documented here. The format follows
   (`SignInMethod::Passkey`).
 - `ConfigBuilder::build` refuses any two equal cookie names (`Error::Config("cookie names
   must differ")`).
+- An `http://127.0.0.1` or `http://[::1]` origin is accepted like `http://localhost`.
 - `password_only` is reserved like latchkey's other method names: `AppMethod::new` refuses
   it, and a stored `password_only` parses as `SignInMethod::PasswordOnly`.
 

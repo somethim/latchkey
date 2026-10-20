@@ -35,10 +35,21 @@ pub const MAX_USER_AGENT: usize = 256;
 
 /// A cookie name with the `__Host-` prefix, which makes browsers keep the cookie host-only,
 /// `Secure` and on path `/`.
+///
+/// The one exception is a [`Config`](crate::Config) built with
+/// [`danger_insecure_localhost_cookies`](crate::ConfigBuilder::danger_insecure_localhost_cookies)
+/// for plain-HTTP development on localhost: its cookie names lose the prefix and its cookies
+/// are sent without `Secure` ([`is_secure`](Self::is_secure) is `false`). Such names cannot be
+/// built any other way, and do not deserialize.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "String", into = "String"))]
-pub struct CookieName(String);
+pub struct CookieName {
+    name: String,
+    secure: bool,
+}
+
+const HOST_PREFIX: &str = "__Host-";
 
 impl CookieName {
     /// Checks the prefix and that the name is a valid cookie token.
@@ -47,22 +58,52 @@ impl CookieName {
     ///
     /// [`Error::Config`] when it lacks `__Host-` or has characters a cookie name cannot.
     pub fn new(name: &str) -> Result<Self, Error> {
-        if !name.starts_with("__Host-") {
+        if !name.starts_with(HOST_PREFIX) {
             return Err(Error::Config("cookie name must start with __Host-"));
         }
-        let token = name
-            .bytes()
-            .all(|b| b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?={}".contains(&b));
-        if !token {
+        check_token(name)?;
+        Ok(Self {
+            name: name.to_owned(),
+            secure: true,
+        })
+    }
+
+    /// The name without its `__Host-` prefix, for cookies without `Secure`: only for a
+    /// config that checked its origin is plain-HTTP localhost.
+    pub(crate) fn insecure_localhost(name: &str) -> Result<Self, Error> {
+        let bare = name.strip_prefix(HOST_PREFIX).unwrap_or(name);
+        if bare.is_empty() || bare.starts_with("__Secure-") || bare.starts_with(HOST_PREFIX) {
             return Err(Error::Config("cookie name has invalid characters"));
         }
-        Ok(Self(name.to_owned()))
+        check_token(bare)?;
+        Ok(Self {
+            name: bare.to_owned(),
+            secure: false,
+        })
     }
 
     /// The name.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.name
+    }
+
+    /// Whether cookies under this name carry `Secure`: always, except under
+    /// [`danger_insecure_localhost_cookies`](crate::ConfigBuilder::danger_insecure_localhost_cookies).
+    #[must_use]
+    pub const fn is_secure(&self) -> bool {
+        self.secure
+    }
+}
+
+fn check_token(name: &str) -> Result<(), Error> {
+    let token = name
+        .bytes()
+        .all(|b| b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?={}".contains(&b));
+    if token {
+        Ok(())
+    } else {
+        Err(Error::Config("cookie name has invalid characters"))
     }
 }
 
@@ -76,17 +117,19 @@ impl TryFrom<String> for CookieName {
 
 impl From<CookieName> for String {
     fn from(name: CookieName) -> String {
-        name.0
+        name.name
     }
 }
 
 impl std::fmt::Display for CookieName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.name)
     }
 }
 
-/// A cookie for the client: `name=value; Path=/; Max-Age=…; HttpOnly; Secure; SameSite=Lax`.
+/// A cookie for the client: `name=value; Path=/; Max-Age=…; HttpOnly; Secure; SameSite=Lax`
+/// (without `Secure` only for a name from a config with
+/// [`danger_insecure_localhost_cookies`](crate::ConfigBuilder::danger_insecure_localhost_cookies)).
 /// The value is a bearer secret: `Debug` leaves it out and it is zeroed on drop.
 #[derive(Clone, PartialEq, Eq)]
 #[must_use = "a cookie does nothing until it is sent as a Set-Cookie header"]
@@ -136,8 +179,13 @@ impl SetCookie {
     /// The whole `Set-Cookie` header value.
     #[must_use]
     pub fn header_value(&self) -> String {
+        let secure = if self.name.is_secure() {
+            " Secure;"
+        } else {
+            ""
+        };
         format!(
-            "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+            "{}={}; Path=/; Max-Age={}; HttpOnly;{secure} SameSite=Lax",
             self.name,
             self.value,
             self.max_age.whole_seconds().max(0)
@@ -335,7 +383,10 @@ mod tests {
     use super::*;
 
     fn name(raw: &str) -> CookieName {
-        CookieName::new(raw).unwrap_or_else(|_| CookieName(String::from("__Host-x")))
+        CookieName::new(raw).unwrap_or_else(|_| CookieName {
+            name: String::from("__Host-x"),
+            secure: true,
+        })
     }
 
     #[test]
@@ -361,6 +412,28 @@ mod tests {
                 .header_value()
                 .starts_with("__Host-latchkey=; Path=/; Max-Age=0;")
         );
+    }
+
+    #[test]
+    fn insecure_localhost_names_drop_the_prefix_and_secure() -> Result<(), Error> {
+        let name = CookieName::insecure_localhost("__Host-latchkey")?;
+        assert_eq!(name.as_str(), "latchkey");
+        assert!(!name.is_secure());
+        assert!(CookieName::new("__Host-latchkey")?.is_secure());
+        let token = SecretToken::from_presented("abc");
+        assert_eq!(
+            SetCookie::new(name.clone(), &token, Duration::days(1)).header_value(),
+            "latchkey=abc; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax"
+        );
+        assert_eq!(
+            SetCookie::removal(name).header_value(),
+            "latchkey=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+        );
+        assert_eq!(CookieName::insecure_localhost("plain")?.as_str(), "plain");
+        for bad in ["__Host-", "__Host-__Secure-x", "__Host-a;b", ""] {
+            assert!(CookieName::insecure_localhost(bad).is_err(), "{bad:?}");
+        }
+        Ok(())
     }
 
     #[test]

@@ -15,6 +15,10 @@ app side right is what keeps sign-in secure.
 - Pass a `CryptoRng` (`latchkey::os_rng()?` with the default `os-rng` feature, or another
   CSPRNG). Never a seeded test RNG in production.
 - Build `Config` once with `Config::builder(owner_email, origin).build()?`.
+- For plain-HTTP development only, `.danger_insecure_localhost_cookies()` drops `__Host-`
+  and `Secure`; `build` refuses it unless the origin is `http://localhost`, `127.0.0.1` or
+  `[::1]`. Never enable it from a request value or a production config; read cookie names
+  from `config.cookie_name()` etc. rather than hard-coding `__Host-latchkey`.
 
 ## Storage
 
