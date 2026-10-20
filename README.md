@@ -1,0 +1,199 @@
+# latchkey
+
+Sign-in for a small [axum](https://github.com/tokio-rs/axum) app that you run for yourself and a
+few people you invite. It is a library: you nest its router into your app, protect your own
+routes with its extractors, and give it a database and a way to send mail.
+
+- **Password**, always followed by a second factor (TOTP, passkey or recovery code).
+- **Passkeys** with user verification required. A passkey signs in on its own.
+- **Email sign-in link**, single use, valid for 15 minutes, signs in directly.
+- **TOTP** (SHA-1, 6 digits, 30 s, ±1 step) with a replay guard on the time step.
+- **Recovery codes**: 10 single-use codes, stored as SHA-256 hashes.
+- **First-open setup**: the owner account is created from a configured email address. Until it
+  is set up, a single-use link is mailed to that address only; the owner then sets a password,
+  enrols a passkey and/or TOTP, and receives recovery codes.
+- **Invites**: the owner invites family members by email; they go through the same setup.
+- **Sessions**: random 32-byte tokens stored as SHA-256, a new token on every stage change,
+  a list of active sessions with revocation, and a 5-minute step-up window for sensitive changes.
+- **Throttling**: per-IP and per-account rate limits, and an account lockout that starts at
+  5 minutes after 5 failures and doubles on every further 5 up to an hour.
+- **Audit log**: append-only, with client IPs stored only as an HMAC.
+
+The building blocks are maintained crates, not custom cryptography: `argon2`, `webauthn-rs`,
+`totp-rs`, `sha2`, `hmac`, `subtle`, `rand` and `sqlx`.
+
+## Quick start
+
+```toml
+[dependencies]
+latchkey = "0.1"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust,no_run
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::{Router, routing::get};
+use latchkey::{
+    Config, CurrentUser, Latchkey, Mail, MailError, Mailer, RecentAuth, SqliteStore, async_trait,
+};
+
+struct MyMailer;
+
+#[async_trait]
+impl Mailer for MyMailer {
+    async fn send(&self, mail: Mail) -> Result<(), MailError> {
+        // Hand `mail.to`, `mail.subject()` and `mail.text()` (or your own template built
+        // from `mail.kind` and `mail.link`) to your mail provider.
+        Ok(())
+    }
+}
+
+async fn home(user: CurrentUser) -> String {
+    format!("Hello, {}", user.display_name())
+}
+
+async fn danger(_user: RecentAuth) -> &'static str {
+    "only reachable within 5 minutes of signing in or stepping up"
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let secret_key: [u8; 32] = load_secret_key();
+    let config = Config::new("owner@example.com", "https://home.example.com", secret_key)?;
+    let store = SqliteStore::connect("sqlite://auth.db").await?;
+    let auth = Latchkey::new(config, Arc::new(store), Arc::new(MyMailer)).await?;
+
+    let app = Router::new()
+        .route("/", get(home))
+        .route("/danger", get(danger))
+        .nest("/auth", auth.router())
+        .with_state(auth);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    Ok(())
+}
+# fn load_secret_key() -> [u8; 32] { [1; 32] }
+```
+
+If your app has its own state type, implement `axum::extract::FromRef<YourState> for Latchkey`
+and the extractors find it there. `examples/minimal.rs` is a runnable version that prints mail
+to the terminal: `cargo run --example minimal`.
+
+### Configuration
+
+`Config::new(owner_email, origin, secret_key)` fills in the defaults described above; every
+field is public. The ones you are most likely to change:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `setup_url`, `sign_in_link_url`, `invite_url` | `/setup`, `/sign-in/link`, `/invite` on the origin | Front-end pages that receive `?token=` from mailed links |
+| `cookie_name` | `__Host-latchkey` | Must keep the `__Host-` prefix |
+| `session_ttl` | 30 days | Lifetime of a signed-in session |
+| `step_up_window` | 5 minutes | How long a sign-in or step-up counts as recent |
+| `invite_ttl` | 3 days | Lifetime of an invite link |
+| `rate_limits` | 30/min per IP, 10/min per account | Fixed one-minute windows, in memory |
+| `password` | Argon2id, 64 MiB, t=3, p=2 | Hashing runs one at a time on a blocking thread |
+| `trust_forwarded_for` | `false` | Use the last `X-Forwarded-For` entry as the client IP (only behind your own proxy) |
+
+`secret_key` keys the HMAC used for IP addresses in sessions and the audit log. Keep it stable
+and out of the repository.
+
+`Latchkey::reset_owner()` wipes the owner's password, factors and sessions so first-open setup
+runs again, for when every factor is lost; call it from a command-line entry point of your app.
+`Latchkey::purge_expired()` deletes expired sessions and links.
+
+## Endpoints
+
+All bodies are JSON. Responses that start a session set the cookie and include `stage` and
+`csrf_token`. Errors are `{"error": "<code>"}` with a generic code such as `sign_in_failed`,
+`step_up_required`, `csrf_rejected` or `too_many_attempts`.
+
+| Method and path | Needs | Purpose |
+|---|---|---|
+| `GET /setup/status` | | `{"setup_required": bool}` |
+| `POST /setup/start` | | Mails a setup link to the owner (always `202`) |
+| `POST /setup/redeem` `{token}` | | Starts a setup session |
+| `POST /setup/password` `{password}` | setup session | 12 to 1024 characters |
+| `POST /setup/complete` | setup session | Needs a password and a TOTP or passkey; returns `recovery_codes` |
+| `POST /invites` `{email, display_name?}` | owner, recent | Creates a member and mails an invite |
+| `POST /invites/redeem` `{token}` | | Starts a setup session for the invited member |
+| `GET /me` | any session | Account, stage, CSRF token, enrolled factors |
+| `POST /sign-in/password` `{email, password}` | | First step; leaves a `second_factor` session |
+| `POST /sign-in/code` `{code}` | second-factor session | TOTP or recovery code |
+| `POST /sign-in/second-factor/passkey/start`, `/finish` | second-factor session | Passkey as the second factor |
+| `POST /sign-in/passkey/start`, `/finish` `{ceremony, credential}` | | Passkey sign-in (discoverable credential) |
+| `POST /sign-in/email` `{email}` | | Mails a sign-in link (always `202`) |
+| `POST /sign-in/email/redeem` `{token}` | | Signs in |
+| `POST /sign-out` | any session | |
+| `POST /step-up/password` `{password, code}` | signed in | Refreshes the step-up window |
+| `POST /step-up/passkey/start`, `/finish` | signed in | Same, with a passkey |
+| `POST /password` `{password}` | recent | Changes the password |
+| `POST /totp/enrol`, `POST /totp/confirm` `{code}` | setup session, or recent | |
+| `DELETE /totp` | recent | Refused if it is the last factor |
+| `GET /passkeys` | signed in | |
+| `POST /passkeys/register/start` `{name?}`, `/finish` `{ceremony, credential}` | setup session, or recent | |
+| `DELETE /passkeys/{id}` | recent | Refused if it is the last factor |
+| `POST /recovery-codes` | recent | Replaces all recovery codes |
+| `GET /sessions` | signed in | |
+| `DELETE /sessions/{id}` | recent | |
+| `GET /audit?limit=` | signed in | Owner sees everything, members see their own events |
+
+Passkey `options` are the WebAuthn JSON for `navigator.credentials.create`/`get`; send the
+browser's credential back as `credential`, base64url-encoded as `webauthn-rs` expects.
+
+### From the browser
+
+- Send every unsafe request (`POST`, `DELETE`, ...) with the `x-csrf-token` header set to the
+  current `csrf_token` (also available from `GET /me`). The router and the `CurrentUser`
+  extractor reject unsafe requests whose `Origin` is not the configured origin, or, without an
+  `Origin` header, whose `Sec-Fetch-Site` is not `same-origin`.
+- Links in mail point at your front-end pages; read `token` from the query string, remove it
+  from the address bar, and post it to the matching `redeem` endpoint.
+
+## Security notes
+
+- Passwords are hashed with Argon2id. An unknown email still runs a full hash against a dummy
+  value, and the response is the same as for a wrong password.
+- Link requests answer `202` whether or not the address belongs to an account, and mail goes
+  out on a background task so response times do not depend on it.
+- Tokens, CSRF values and recovery codes come from a CSPRNG; only their SHA-256 is stored.
+  CSRF tokens are compared in constant time.
+- Every stage change (setup, second factor, signed in) issues a new session token and deletes
+  the old one.
+- A TOTP code is accepted once: the matched time step is stored and older or equal steps are
+  refused, atomically.
+- Links, recovery codes and passkey ceremonies are single use. Passkey ceremonies are bound to
+  the session that started them and expire after 5 minutes.
+- Counter regressions on a passkey (a possible cloned authenticator) are rejected by
+  `webauthn-rs`.
+- The crate forbids `unsafe` and denies `unwrap`, `expect` and `panic!` outside tests.
+
+Known trade-offs:
+
+- A locked account answers `too_many_attempts` instead of `sign_in_failed`, which tells an
+  attacker who has already made 5 wrong guesses that the address exists.
+- Rate-limit counters and passkey ceremonies live in memory: they reset on restart and are not
+  shared between several instances of the app.
+- TOTP secrets and passkey data are stored unencrypted in the database. Protect the database
+  file like a password store.
+
+## What it does not do
+
+- No OAuth or OpenID Connect, neither as a provider nor as a client, and no forward-auth for
+  other applications.
+- No self-service sign-up: accounts are the owner and the people the owner invites.
+- No mail sending, templates or front-end pages; the app supplies those.
+- Storage ships for SQLite only. The `Store` trait is public so another database can be added.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above,
+without any additional terms or conditions.
