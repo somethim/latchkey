@@ -4,8 +4,21 @@
 //! the browser and a [`Ceremony`] holding the server-side state; `finish_*` consumes the
 //! state. Store the ceremony (it is `Serialize`) under its [`id`](Ceremony::id), hand the id
 //! to the client, and on finish **remove** it before use: ceremonies are single use. A
-//! ceremony is bound to the session (and account) that started it and expires after
-//! [`CEREMONY_TTL`]; [`Ceremony::into_state`] checks both.
+//! ceremony expires after [`CEREMONY_TTL`] and is bound to whoever started it
+//! ([`Ceremony::binding`]):
+//!
+//! | Started by | [`Binding`] | Finish with |
+//! |---|---|---|
+//! | [`start_registration`](RelyingParty::start_registration), [`start_authentication`](RelyingParty::start_authentication) (second factor, step-up) | [`Binding::Session`]: the session and account | [`Ceremony::into_state`] |
+//! | [`start_sign_in`](RelyingParty::start_sign_in) (allow-list), [`start_discoverable`](RelyingParty::start_discoverable) | [`Binding::Browser`]: a one-off binding token, and the account for an allow-list | [`Ceremony::into_browser_state`] |
+//!
+//! A sign-in has no session yet, so its ceremony is bound to the browser instead: the start
+//! also returns a binding token (a [`SecretToken`]) that the ceremony keeps only the hash
+//! of. Send it as a cookie,
+//! `SetCookie::new(config.ceremony_cookie_name().clone(), &token, CEREMONY_TTL)`, and on
+//! finish pass the cookie's value to [`Ceremony::into_browser_state`], so only the browser
+//! that started a sign-in can finish it. For an allow-list sign-in,
+//! [`Binding::user`] names the account whose passkeys to load.
 //!
 //! webauthn-rs draws its challenges from OpenSSL's random number generator, not from an RNG
 //! you pass in. This is the one place latchkey uses randomness it does not take as a
@@ -28,11 +41,56 @@ use webauthn_rs::{Webauthn, WebauthnBuilder};
 use crate::Error;
 use crate::config::Config;
 use crate::ids::{CeremonyId, SessionId, UserId};
+use crate::token::{self, SecretToken, TokenHash};
 
 pub use webauthn_rs;
 
 /// How long a ceremony stays valid.
 pub const CEREMONY_TTL: Duration = Duration::minutes(5);
+
+/// What a [`Ceremony`] is bound to: the request that finishes it must prove the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Binding {
+    /// Started from this session for this account: a registration, a passkey second factor
+    /// or a step-up. Finish with [`Ceremony::into_state`].
+    Session {
+        /// The session that started it.
+        session: SessionId,
+        /// Its account.
+        user: UserId,
+    },
+    /// Started before any session exists, by the browser holding the binding token whose
+    /// hash this is: a sign-in with an allow-list for `user`, or a discoverable sign-in
+    /// (`user` is `None`). Finish with [`Ceremony::into_browser_state`].
+    Browser {
+        /// The hash of the binding token the start returned.
+        token_hash: TokenHash,
+        /// The account whose passkeys were offered, for an allow-list sign-in.
+        user: Option<UserId>,
+    },
+}
+
+impl Binding {
+    /// The account the ceremony is for, if it names one: load its passkeys to finish.
+    #[must_use]
+    pub const fn user(&self) -> Option<UserId> {
+        match *self {
+            Binding::Session { user, .. } => Some(user),
+            Binding::Browser { user, .. } => user,
+        }
+    }
+
+    /// The session that started it, for a [`Binding::Session`].
+    #[must_use]
+    pub const fn session(&self) -> Option<SessionId> {
+        match *self {
+            Binding::Session { session, .. } => Some(session),
+            Binding::Browser { .. } => None,
+        }
+    }
+}
 
 /// A pending ceremony: the webauthn-rs state `S` plus what it is bound to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -40,8 +98,7 @@ pub const CEREMONY_TTL: Duration = Duration::minutes(5);
 pub struct Ceremony<S> {
     id: CeremonyId,
     state: S,
-    session: Option<SessionId>,
-    user: Option<UserId>,
+    binding: Binding,
     expires_at: OffsetDateTime,
 }
 
@@ -52,6 +109,13 @@ impl<S> Ceremony<S> {
         self.id
     }
 
+    /// What it is bound to: read [`Binding::user`] to know whose passkeys to load before
+    /// finishing.
+    #[must_use]
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
     /// When it stops working.
     #[must_use]
     pub fn expires_at(&self) -> OffsetDateTime {
@@ -59,23 +123,46 @@ impl<S> Ceremony<S> {
     }
 
     /// The webauthn-rs state, if the ceremony is unexpired and was started by `session` for
-    /// `user` (both `None` for discoverable sign-in). Consumes the ceremony.
+    /// `user` ([`Binding::Session`]). Consumes the ceremony.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidRequest`] with `unknown_ceremony`.
+    /// [`Error::InvalidRequest`] with `unknown_ceremony`, also for a ceremony bound to a
+    /// browser.
     pub fn into_state(
         self,
-        session: Option<SessionId>,
-        user: Option<UserId>,
+        session: SessionId,
+        user: UserId,
         now: OffsetDateTime,
     ) -> Result<S, Error> {
-        if self.expires_at <= now || self.session != session || self.user != user {
-            return Err(Error::InvalidRequest("unknown_ceremony"));
+        let bound = self.binding == Binding::Session { session, user };
+        if self.expires_at <= now || !bound {
+            return Err(UNKNOWN);
+        }
+        Ok(self.state)
+    }
+
+    /// The webauthn-rs state, if the ceremony is unexpired and `binding_token` is the token
+    /// its start returned ([`Binding::Browser`]), compared in constant time. Consumes the
+    /// ceremony.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] with `unknown_ceremony`, also for a ceremony bound to a
+    /// session.
+    pub fn into_browser_state(self, binding_token: &str, now: OffsetDateTime) -> Result<S, Error> {
+        let bound = match self.binding {
+            Binding::Browser { token_hash, .. } => token_hash.verify(binding_token),
+            Binding::Session { .. } => false,
+        };
+        if self.expires_at <= now || !bound {
+            return Err(UNKNOWN);
         }
         Ok(self.state)
     }
 }
+
+const UNKNOWN: Error = Error::InvalidRequest("unknown_ceremony");
 
 /// The relying party: the app's origin and passkey settings.
 #[derive(Debug)]
@@ -130,7 +217,7 @@ impl RelyingParty {
             .map_err(|_| Error::Crypto("webauthn registration start"))?;
         Ok((
             challenge,
-            ceremony(state, Some(session), Some(user), now, rng),
+            ceremony(state, Binding::Session { session, user }, now, rng),
         ))
     }
 
@@ -183,7 +270,7 @@ impl RelyingParty {
             .map_err(|_| Error::Crypto("webauthn authentication start"))?;
         Ok((
             challenge,
-            ceremony(state, Some(session), Some(user), now, rng),
+            ceremony(state, Binding::Session { session, user }, now, rng),
         ))
     }
 
@@ -203,11 +290,55 @@ impl RelyingParty {
             .map_err(|_| Error::SignInFailed)
     }
 
+    /// Starts a passkey sign-in for `user` before any session exists, offering only
+    /// `passkeys` (an allow-list, for when the user typed their address first). Bound to the
+    /// browser: send the returned binding token as a cookie and finish with
+    /// [`Ceremony::into_browser_state`], then
+    /// [`finish_authentication`](Self::finish_authentication) against the passkeys of
+    /// [`Binding::user`], and report the result as
+    /// [`SignInEvent::DiscoverablePasskey`](crate::flow::sign_in::SignInEvent::DiscoverablePasskey).
+    ///
+    /// Answering differently for addresses without passkeys tells a visitor which addresses
+    /// have them; prefer [`start_discoverable`](Self::start_discoverable) where browsers
+    /// support it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] with `no_passkey`, or [`Error::Crypto`].
+    #[allow(clippy::type_complexity)]
+    pub fn start_sign_in<R: CryptoRng + ?Sized>(
+        &self,
+        user: UserId,
+        passkeys: &[Passkey],
+        now: OffsetDateTime,
+        rng: &mut R,
+    ) -> Result<
+        (
+            RequestChallengeResponse,
+            Ceremony<PasskeyAuthentication>,
+            SecretToken,
+        ),
+        Error,
+    > {
+        if passkeys.is_empty() {
+            return Err(Error::InvalidRequest("no_passkey"));
+        }
+        let (challenge, state) = self
+            .webauthn
+            .start_passkey_authentication(passkeys)
+            .map_err(|_| Error::Crypto("webauthn authentication start"))?;
+        let (ceremony, token) = browser_ceremony(state, Some(user), now, rng);
+        Ok((challenge, ceremony, token))
+    }
+
     /// Starts a passkey sign-in where the browser offers the user's discoverable passkeys.
+    /// Bound to the browser like [`start_sign_in`](Self::start_sign_in): send the returned
+    /// binding token as a cookie and finish with [`Ceremony::into_browser_state`].
     ///
     /// # Errors
     ///
     /// [`Error::Crypto`] when webauthn-rs fails.
+    #[allow(clippy::type_complexity)]
     pub fn start_discoverable<R: CryptoRng + ?Sized>(
         &self,
         now: OffsetDateTime,
@@ -216,6 +347,7 @@ impl RelyingParty {
         (
             RequestChallengeResponse,
             Ceremony<DiscoverableAuthentication>,
+            SecretToken,
         ),
         Error,
     > {
@@ -223,7 +355,8 @@ impl RelyingParty {
             .webauthn
             .start_discoverable_authentication()
             .map_err(|_| Error::Crypto("webauthn discoverable start"))?;
-        Ok((challenge, ceremony(state, None, None, now, rng)))
+        let (ceremony, token) = browser_ceremony(state, None, now, rng);
+        Ok((challenge, ceremony, token))
     }
 
     /// The account a discoverable assertion claims, from its user handle. Load that
@@ -275,16 +408,28 @@ pub fn record_use(passkeys: &mut [Passkey], result: &AuthenticationResult) -> Op
 
 fn ceremony<S, R: CryptoRng + ?Sized>(
     state: S,
-    session: Option<SessionId>,
-    user: Option<UserId>,
+    binding: Binding,
     now: OffsetDateTime,
     rng: &mut R,
 ) -> Ceremony<S> {
     Ceremony {
         id: CeremonyId::random(rng),
         state,
-        session,
-        user,
+        binding,
         expires_at: now.saturating_add(CEREMONY_TTL),
     }
+}
+
+fn browser_ceremony<S, R: CryptoRng + ?Sized>(
+    state: S,
+    user: Option<UserId>,
+    now: OffsetDateTime,
+    rng: &mut R,
+) -> (Ceremony<S>, SecretToken) {
+    let issued = token::issue(rng);
+    let binding = Binding::Browser {
+        token_hash: issued.hash,
+        user,
+    };
+    (ceremony(state, binding, now, rng), issued.token)
 }

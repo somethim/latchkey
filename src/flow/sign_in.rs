@@ -102,12 +102,14 @@ pub enum SignInEvent {
         /// The client.
         client: Client,
     },
-    /// A discoverable passkey assertion; the account is the one its user handle names. From
-    /// [`SignIn::Start`].
+    /// A passkey sign-in with no password: a discoverable assertion (the account is the one
+    /// its user handle names) or an allow-list one started for an account before any session
+    /// existed. From [`SignIn::Start`].
     DiscoverablePasskey {
         /// The account, if the handle names one.
         account: Option<Account>,
-        /// Whether the assertion verified against that account's passkeys.
+        /// Whether the assertion verified against that account's passkeys, through a
+        /// ceremony bound to this browser.
         verified: bool,
         /// The client.
         client: Client,

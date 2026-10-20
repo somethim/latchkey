@@ -30,6 +30,14 @@ All notable changes to this crate are documented here. The format follows
   the old behaviour.
 - `Factors::has_second_factor`, `Factors::are_sufficient(policy)` and
   `Factors::password_suffices(policy)`.
+- `passkey::Binding` and `Ceremony::binding()`: what a ceremony is bound to, with
+  `Binding::user()` naming the account whose passkeys to load before finishing.
+- `RelyingParty::start_sign_in(user, passkeys, now, rng)`: a passkey sign-in with an
+  allow-list before any session exists. It and `start_discoverable` bind their ceremony to
+  the browser with a one-off binding token (returned as a `SecretToken`; the ceremony keeps
+  only its hash), finished with `Ceremony::into_browser_state(binding_token, now)`.
+- `ConfigBuilder::ceremony_cookie_name` / `Config::ceremony_cookie_name` (default
+  `__Host-latchkey_ceremony`) for the binding token's cookie.
 
 ### Changed
 
@@ -37,6 +45,15 @@ All notable changes to this crate are documented here. The format follows
   struct literal must set it (0 when step-up failures count against the account).
 - `AuditKind::SessionRevoked` also records a session ended by the step-up limit, with detail
   `step_up_failures`.
+- `Ceremony::into_state(session, user, now)` takes the session and account instead of
+  `Option`s and only finishes session-bound ceremonies; `RelyingParty::start_discoverable`
+  also returns the binding token, and its ceremony is finished with `into_browser_state`.
+  Ceremonies stored by earlier 0.3.0-dev builds no longer deserialize (they expire after 5
+  minutes anyway).
+- `SignInEvent::DiscoverablePasskey` also reports allow-list passkey sign-ins
+  (`SignInMethod::Passkey`).
+- `ConfigBuilder::build` refuses any two equal cookie names (`Error::Config("cookie names
+  must differ")`).
 - `password_only` is reserved like latchkey's other method names: `AppMethod::new` refuses
   it, and a stored `password_only` parses as `SignInMethod::PasswordOnly`.
 

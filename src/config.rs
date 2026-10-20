@@ -36,6 +36,7 @@ pub struct Config {
     owner_name: String,
     cookie_name: CookieName,
     device_cookie_name: CookieName,
+    ceremony_cookie_name: CookieName,
     setup_url: Url,
     sign_in_link_url: Url,
     invite_url: Url,
@@ -86,6 +87,7 @@ pub struct ConfigBuilder {
     owner_name: Option<String>,
     cookie_name: String,
     device_cookie_name: String,
+    ceremony_cookie_name: String,
     setup_path: String,
     sign_in_link_path: String,
     invite_path: String,
@@ -173,6 +175,14 @@ impl ConfigBuilder {
         self
     }
 
+    /// The name of the cookie that binds a passkey sign-in to the browser that started it
+    /// (see [`passkey`](crate::passkey) with the `passkeys` feature); must start with
+    /// `__Host-` and differ from the other two. Default `__Host-latchkey_ceremony`.
+    pub fn ceremony_cookie_name(mut self, name: &str) -> Self {
+        name.clone_into(&mut self.ceremony_cookie_name);
+        self
+    }
+
     /// The page that receives `?token=` from setup links, relative to the origin. Default
     /// `/setup`.
     pub fn setup_path(mut self, path: &str) -> Self {
@@ -235,7 +245,7 @@ impl ConfigBuilder {
     /// # Errors
     ///
     /// [`Error::Config`] when the origin is not an `https` URL (or `http://localhost`), the
-    /// owner address or a cookie name is invalid, the cookie names are equal, or a path does
+    /// owner address or a cookie name is invalid, two cookie names are equal, or a path does
     /// not join onto the origin, or a [`StepUpFailures::PerSession`] limit is 0.
     /// [`Error::InvalidRequest`] with `email` for a bad owner
     /// address.
@@ -253,10 +263,12 @@ impl ConfigBuilder {
             Email::parse(&self.owner_email).map_err(|_| Error::Config("owner email"))?;
         let cookie_name = CookieName::new(&self.cookie_name)?;
         let device_cookie_name = CookieName::new(&self.device_cookie_name)?;
-        if cookie_name == device_cookie_name {
-            return Err(Error::Config(
-                "device cookie name must differ from the cookie name",
-            ));
+        let ceremony_cookie_name = CookieName::new(&self.ceremony_cookie_name)?;
+        if cookie_name == device_cookie_name
+            || cookie_name == ceremony_cookie_name
+            || device_cookie_name == ceremony_cookie_name
+        {
+            return Err(Error::Config("cookie names must differ"));
         }
         let join = |path: &str| {
             origin
@@ -282,6 +294,7 @@ impl ConfigBuilder {
             owner_email,
             cookie_name,
             device_cookie_name,
+            ceremony_cookie_name,
             origin,
             durations: self.durations,
             lockout: self.lockout,
@@ -305,6 +318,7 @@ impl Config {
             owner_name: None,
             cookie_name: "__Host-latchkey".to_owned(),
             device_cookie_name: "__Host-latchkey_device".to_owned(),
+            ceremony_cookie_name: "__Host-latchkey_ceremony".to_owned(),
             setup_path: "/setup".to_owned(),
             sign_in_link_path: "/sign-in/link".to_owned(),
             invite_path: "/invite".to_owned(),
@@ -364,6 +378,12 @@ impl Config {
     #[must_use]
     pub fn device_cookie_name(&self) -> &CookieName {
         &self.device_cookie_name
+    }
+
+    /// The passkey sign-in binding cookie's name.
+    #[must_use]
+    pub fn ceremony_cookie_name(&self) -> &CookieName {
+        &self.ceremony_cookie_name
     }
 
     /// Where setup links point.
@@ -433,6 +453,10 @@ mod tests {
             config.device_cookie_name().as_str(),
             "__Host-latchkey_device"
         );
+        assert_eq!(
+            config.ceremony_cookie_name().as_str(),
+            "__Host-latchkey_ceremony"
+        );
         assert_eq!(config.session_ttl(), Duration::days(30));
         assert_eq!(config.step_up_window(), Duration::minutes(5));
         assert_eq!(config.link_ttl(), Duration::minutes(15));
@@ -457,6 +481,13 @@ mod tests {
                 .build()
                 .is_err()
         );
+        assert!(
+            builder()
+                .ceremony_cookie_name("__Host-latchkey_device")
+                .build()
+                .is_err()
+        );
+        assert!(builder().ceremony_cookie_name("ceremony").build().is_err());
         assert!(
             Config::builder("o@example.com", "http://home.example.com")
                 .build()

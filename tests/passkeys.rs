@@ -15,7 +15,7 @@ use latchkey::flow::step_up::{StepUp, StepUpEvent};
 use latchkey::passkey::webauthn_rs::prelude::{
     Passkey, PublicKeyCredential, RequestChallengeResponse,
 };
-use latchkey::passkey::{CEREMONY_TTL, RelyingParty, record_use};
+use latchkey::passkey::{Binding, CEREMONY_TTL, RelyingParty, record_use};
 use latchkey::session::SignInMethod;
 use latchkey::{Error, PasskeyId, UserId};
 use time::Duration;
@@ -70,7 +70,7 @@ impl Key {
             .do_registration(Self::origin(), challenge)
             .map_err(|_| Error::InvalidRequest("authenticator_refused"))?;
         self.credential_id = Some(credential.raw_id.clone());
-        let state = ceremony.into_state(Some(session), Some(user), app.now)?;
+        let state = ceremony.into_state(session, user, app.now)?;
         rp.finish_registration(&credential, &state, existing)
     }
 
@@ -133,11 +133,14 @@ fn setup_with_a_passkey_only_and_sign_in_with_it() {
     let mut passkeys = owner_with_passkey(&mut app, &mut Browser::default(), &rp, &mut key);
     let owner = app.owner_id();
 
-    let (challenge, ceremony) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
+    let (challenge, ceremony, binding) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
+    assert_eq!(ceremony.binding().user(), None);
     let credential = key.assert_discoverable(challenge, owner);
     let claimed = rp.identify_discoverable(&credential).unwrap();
     assert_eq!(claimed, owner);
-    let state = ceremony.into_state(None, None, app.now).unwrap();
+    let state = ceremony
+        .into_browser_state(binding.expose_secret(), app.now)
+        .unwrap();
     let result = rp
         .finish_discoverable(&credential, state, claimed, &passkeys)
         .unwrap();
@@ -168,16 +171,21 @@ fn setup_with_a_passkey_only_and_sign_in_with_it() {
 fn a_ceremony_is_consumed_by_use() {
     let mut app = App::new();
     let rp = RelyingParty::new(&app.config).unwrap();
-    let (_, ceremony) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
+    let (_, ceremony, binding) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
     let stored = serde_json::to_string(&ceremony).unwrap();
-    let state = ceremony.into_state(None, None, app.now);
+    assert!(!stored.contains(binding.expose_secret()));
+    let state = ceremony.into_browser_state(binding.expose_secret(), app.now);
     assert!(state.is_ok());
     // `ceremony` has moved: the only way to use it again is a stored copy, which the app
     // deletes when it takes it. A copy restored from storage still works once, as here.
     let restored: latchkey::passkey::Ceremony<
         latchkey::passkey::webauthn_rs::prelude::DiscoverableAuthentication,
     > = serde_json::from_str(&stored).unwrap();
-    assert!(restored.into_state(None, None, app.now).is_ok());
+    assert!(
+        restored
+            .into_browser_state(binding.expose_secret(), app.now)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -196,30 +204,22 @@ fn ceremonies_expire_and_are_bound_to_their_session_and_user() {
     };
     let unknown = Some(Error::InvalidRequest("unknown_ceremony"));
     assert_eq!(
-        start(&mut app)
-            .into_state(Some(other), Some(owner), app.now)
-            .err(),
+        start(&mut app).into_state(other, owner, app.now).err(),
         unknown
     );
     let stranger = UserId::random(&mut app.rng);
     assert_eq!(
-        start(&mut app)
-            .into_state(Some(session), Some(stranger), app.now)
-            .err(),
+        start(&mut app).into_state(session, stranger, app.now).err(),
         unknown
     );
     let ceremony = start(&mut app);
     assert_eq!(
         ceremony
-            .into_state(Some(session), Some(owner), app.now + CEREMONY_TTL)
+            .into_state(session, owner, app.now + CEREMONY_TTL)
             .err(),
         unknown
     );
-    assert!(
-        start(&mut app)
-            .into_state(Some(session), Some(owner), app.now)
-            .is_ok()
-    );
+    assert!(start(&mut app).into_state(session, owner, app.now).is_ok());
 }
 
 #[test]
@@ -228,14 +228,16 @@ fn passkey_for_another_user_handle_is_rejected() {
     let rp = RelyingParty::new(&app.config).unwrap();
     let mut key = Key::new();
     let passkeys = owner_with_passkey(&mut app, &mut Browser::default(), &rp, &mut key);
-    let (challenge, ceremony) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
+    let (challenge, ceremony, binding) = rp.start_discoverable(app.now, &mut app.rng).unwrap();
     let stranger = UserId::random(&mut app.rng);
     let credential = key.assert_discoverable(challenge, stranger);
     let claimed = rp.identify_discoverable(&credential).unwrap();
     assert_eq!(claimed, stranger);
     assert!(app.account(claimed).is_none(), "the app finds no account");
     // Even against the owner's passkeys, the user handle does not match.
-    let state = ceremony.into_state(None, None, app.now).unwrap();
+    let state = ceremony
+        .into_browser_state(binding.expose_secret(), app.now)
+        .unwrap();
     assert_eq!(
         rp.finish_discoverable(&credential, state, app.owner_id(), &passkeys)
             .err(),
@@ -272,7 +274,7 @@ fn passkey_as_second_factor_after_password() {
         .unwrap();
     let credential = key.assert(challenge);
     let state = ceremony
-        .into_state(Some(session.id), Some(account.id), app.now)
+        .into_state(session.id, account.id, app.now)
         .unwrap();
     let result = rp.finish_authentication(&credential, &state).unwrap();
     let verified = record_use(&mut passkeys, &result).is_some();
@@ -307,7 +309,7 @@ fn step_up_with_a_passkey() {
         .unwrap();
     let credential = key.assert(challenge);
     let state = ceremony
-        .into_state(Some(session.id), Some(account.id), app.now)
+        .into_state(session.id, account.id, app.now)
         .unwrap();
     let verified = rp.finish_authentication(&credential, &state).is_ok();
     let client = app.client(&browser, Some(account.id));
@@ -345,9 +347,7 @@ fn the_same_passkey_cannot_be_registered_twice() {
     let excluded = &challenge.public_key.exclude_credentials;
     assert_eq!(excluded.as_ref().map(Vec::len), Some(1));
     let credential = key.inner.do_registration(Key::origin(), challenge).unwrap();
-    let state = ceremony
-        .into_state(Some(session), Some(owner), app.now)
-        .unwrap();
+    let state = ceremony.into_state(session, owner, app.now).unwrap();
     let added = rp
         .finish_registration(&credential, &state, &passkeys)
         .unwrap();
@@ -380,4 +380,124 @@ fn sealed_passkeys_open_only_for_their_row() {
 fn a_relying_party_must_match_the_origin() {
     let origin = Url::parse(ORIGIN).unwrap();
     assert!(RelyingParty::from_parts("other.example", "x", &origin).is_err());
+}
+
+#[test]
+fn ceremonies_expose_their_session_binding() {
+    let mut app = App::new();
+    let rp = RelyingParty::new(&app.config).unwrap();
+    let mut key = Key::new();
+    let passkeys = owner_with_passkey(&mut app, &mut Browser::default(), &rp, &mut key);
+    let owner = app.owner_id();
+    let session = latchkey::SessionId::random(&mut app.rng);
+    let (_, ceremony) = rp
+        .start_authentication(owner, &passkeys, session, app.now, &mut app.rng)
+        .unwrap();
+    assert_eq!(
+        *ceremony.binding(),
+        Binding::Session {
+            session,
+            user: owner
+        }
+    );
+    assert_eq!(ceremony.binding().user(), Some(owner));
+    assert_eq!(ceremony.binding().session(), Some(session));
+    let fake = latchkey::token::issue(&mut app.rng);
+    assert_eq!(
+        ceremony
+            .into_browser_state(fake.token.expose_secret(), app.now)
+            .err(),
+        Some(Error::InvalidRequest("unknown_ceremony")),
+        "a session-bound ceremony cannot be finished as a browser-bound one"
+    );
+}
+
+#[test]
+fn passkey_sign_in_with_an_allow_list_before_any_session() {
+    let mut app = App::new();
+    let rp = RelyingParty::new(&app.config).unwrap();
+    let mut key = Key::new();
+    let mut passkeys = owner_with_passkey(&mut app, &mut Browser::default(), &rp, &mut key);
+    let owner = app.owner_id();
+
+    // POST /sign-in/passkey/start {email}: no session exists yet.
+    let mut browser = Browser::default();
+    let (challenge, ceremony, binding) = rp
+        .start_sign_in(owner, &passkeys, app.now, &mut app.rng)
+        .unwrap();
+    assert_eq!(challenge.public_key.allow_credentials.len(), 1);
+    assert_eq!(ceremony.binding().user(), Some(owner));
+    assert_eq!(ceremony.binding().session(), None);
+    let cookie = latchkey::http::SetCookie::new(
+        app.config.ceremony_cookie_name().clone(),
+        &binding,
+        CEREMONY_TTL,
+    );
+    browser.set(&cookie);
+    let stored = serde_json::to_string(&ceremony).unwrap();
+    let credential = key.assert(challenge);
+
+    // Another browser with the ceremony id but without the binding cookie cannot finish it.
+    let restore = || -> latchkey::passkey::Ceremony<
+        latchkey::passkey::webauthn_rs::prelude::PasskeyAuthentication,
+    > { serde_json::from_str(&stored).unwrap() };
+    let other = latchkey::token::issue(&mut app.rng);
+    let unknown = Some(Error::InvalidRequest("unknown_ceremony"));
+    assert_eq!(
+        restore()
+            .into_browser_state(other.token.expose_secret(), app.now)
+            .err(),
+        unknown
+    );
+    assert_eq!(restore().into_browser_state("", app.now).err(), unknown);
+    assert_eq!(
+        restore()
+            .into_state(latchkey::SessionId::random(&mut app.rng), owner, app.now)
+            .err(),
+        unknown,
+        "a browser-bound ceremony cannot be finished as a session-bound one"
+    );
+    assert_eq!(
+        restore()
+            .into_browser_state(binding.expose_secret(), app.now + CEREMONY_TTL)
+            .err(),
+        unknown
+    );
+
+    // POST /sign-in/passkey/finish: the binding cookie, then the account the binding names.
+    let presented = browser.cookies["__Host-latchkey_ceremony"].clone();
+    let ceremony = restore();
+    let user = ceremony.binding().user().unwrap();
+    let state = ceremony.into_browser_state(&presented, app.now).unwrap();
+    let result = rp.finish_authentication(&credential, &state).unwrap();
+    let verified = record_use(&mut passkeys, &result).is_some();
+    let client = app.client(&browser, Some(user));
+    let step = SignIn::Start
+        .advance(
+            &app.config,
+            SignInEvent::DiscoverablePasskey {
+                account: app.account(user),
+                verified,
+                client,
+            },
+            app.now,
+            &mut app.rng,
+        )
+        .unwrap();
+    app.apply(step.effects, &mut browser).unwrap();
+    assert_eq!(
+        app.session_of(&browser).unwrap().method,
+        Some(SignInMethod::Passkey)
+    );
+}
+
+#[test]
+fn an_allow_list_sign_in_needs_passkeys() {
+    let mut app = App::new();
+    let rp = RelyingParty::new(&app.config).unwrap();
+    let owner = app.owner_id();
+    assert_eq!(
+        rp.start_sign_in(owner, &[], app.now, &mut app.rng).err(),
+        Some(Error::InvalidRequest("no_passkey"))
+    );
 }

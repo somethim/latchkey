@@ -22,7 +22,7 @@ audit trail, now as pure functions and state machines.
 | `password` | `PasswordHasher`: Argon2id hash/verify, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
 | `totp` | `TotpSecret`, `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
 | `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
-| `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication and discoverable sign-in; `Ceremony<S>` bound to a session and user, 5 minutes |
+| `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
 | `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, constant-time compare |
 | `seal` | `DataKey`: AES-256-GCM with associated data per owner and kind, compatible with 0.2's stored values |
 | `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
@@ -125,6 +125,32 @@ Then an account with a password and no second factor signs in with the password 
 it, finishes setup and gets `issue_session`. As soon as the account has TOTP or a passkey,
 that factor is required again; `Factors::password_suffices(config.password_only())` says
 which case applies.
+
+### Passkey sign-in before a session exists
+
+Registration, a passkey second factor and step-up run inside a session, and their
+ceremonies are bound to it (`Binding::Session`, finished with `into_state(session.id, user,
+now)`). A passkey sign-in has no session yet: `RelyingParty::start_sign_in(user, passkeys,
+now, rng)` (the user typed their address; the challenge lists their passkeys) and
+`start_discoverable(now, rng)` return a third value, a one-off binding token. The ceremony
+keeps only its hash (`Binding::Browser`).
+
+```rust,ignore
+// POST /sign-in/passkey/start
+let (challenge, ceremony, binding) = rp.start_sign_in(account.id, &passkeys, now, &mut rng)?;
+ceremonies.insert(ceremony.id(), serde_json::to_string(&ceremony)?);
+let cookie = SetCookie::new(config.ceremony_cookie_name().clone(), &binding, CEREMONY_TTL);
+// answer with `challenge` and `ceremony.id()`, and send `cookie.header_value()`
+
+// POST /sign-in/passkey/finish {ceremony_id, credential}
+let ceremony: Ceremony<PasskeyAuthentication> = serde_json::from_str(&ceremonies.remove(&id)?)?;
+let user = ceremony.binding().user().ok_or(Error::SignInFailed)?;
+let state = ceremony.into_browser_state(find_cookie(cookies, config.ceremony_cookie_name().as_str())?, now)?;
+let result = rp.finish_authentication(&credential, &state)?;
+// record_use, then SignInEvent::DiscoverablePasskey { account, verified, client }
+```
+
+Only the browser holding the cookie can finish the ceremony it started.
 
 ## Example: password + TOTP with your own storage
 
@@ -229,7 +255,7 @@ in-memory limiters. 0.3 keeps the decisions and leaves the I/O to the app.
 | `Latchkey::session_from_cookie`, `current_user_from_headers` | `TokenHash::of` + your session lookup + `Session::authorize` |
 | `IssueSession::from_headers` | `http::client_ip`, `http::truncate_user_agent`, `http::find_cookie` into a `flow::Client` |
 | In-memory rate limiter and wrong-password log | `limits::RateLimiter` and `limits::WrongPasswordThrottle`, owned by the app (a `Mutex`), or their per-key states persisted |
-| In-memory passkey ceremonies | `passkey::Ceremony<S>` is `Serialize`: store it under `ceremony.id()`, remove it on finish, then `into_state(session, user, now)` |
+| In-memory passkey ceremonies | `passkey::Ceremony<S>` is `Serialize`: store it under `ceremony.id()`, remove it on finish, then `into_state(session, user, now)`, or for a sign-in `into_browser_state(binding_cookie, now)` |
 | `Clock`, `ManualClock`, `SystemClock` | Pass `now` (`OffsetDateTime::now_utc()` in production, any value in tests) |
 | `Latchkey::encrypt_plaintext_secrets` | `seal::classify_bytes`/`classify_text` find 0.1 plaintext; reseal with `DataKey::seal_bytes`/`seal_text` and `Aad::totp`/`Aad::passkey` |
 | Start-up check of sealed values | Open each stored value with `DataKey::open_totp`/`open_text` at start if you want the same refusal |

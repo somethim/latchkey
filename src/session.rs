@@ -133,7 +133,7 @@ pub enum SignInMethod {
     /// [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled)
     /// (`password_only`).
     PasswordOnly,
-    /// A discoverable passkey on its own (`passkey`).
+    /// A passkey on its own, discoverable or from an allow-list (`passkey`).
     Passkey,
     /// An emailed sign-in link (`email_link`).
     EmailLink,

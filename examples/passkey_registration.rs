@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ceremony: latchkey::passkey::Ceremony<
         latchkey::passkey::webauthn_rs::prelude::PasskeyRegistration,
     > = serde_json::from_str(&stored)?;
-    let state = ceremony.into_state(Some(session), Some(user), now)?;
+    let state = ceremony.into_state(session, user, now)?;
     let passkey = rp.finish_registration(&credential, &state, &[])?;
     let passkey_id = PasskeyId::random(&mut rng);
     let sealed = data_key.seal_passkey(&mut rng, user, passkey_id, &passkey)?;
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut passkeys = vec![data_key.open_passkey(user, passkey_id, &sealed)?];
     let (challenge, ceremony) = rp.start_authentication(user, &passkeys, session, now, &mut rng)?;
     let assertion = browser.do_authentication(origin, challenge)?;
-    let state = ceremony.into_state(Some(session), Some(user), now)?;
+    let state = ceremony.into_state(session, user, now)?;
     let result = rp.finish_authentication(&assertion, &state)?;
     let index = record_use(&mut passkeys, &result).ok_or("not one of the account's passkeys")?;
     println!(

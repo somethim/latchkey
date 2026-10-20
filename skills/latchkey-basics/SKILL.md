@@ -77,7 +77,12 @@ app side right is what keeps sign-in secure.
 
 - `start_*` returns the browser challenge and a `Ceremony`. Keep the ceremony server-side
   under `ceremony.id()`; remove it when the client finishes (single use), then
-  `ceremony.into_state(Some(session.id), Some(user), now)?`.
+  `ceremony.into_state(session.id, user, now)?` for registration, second factor and step-up.
+- Passkey sign-in without a session (`start_sign_in` with an allow-list, or
+  `start_discoverable`) also returns a binding token: send it as a cookie named
+  `config.ceremony_cookie_name()` for `CEREMONY_TTL`, and finish with
+  `ceremony.into_browser_state(cookie_value, now)?`. Load the passkeys of
+  `ceremony.binding().user()` for an allow-list sign-in. Never invent a session id for it.
 - After `finish_authentication` / `finish_discoverable`, call `passkey::record_use` and
   store the updated passkey; `None` means it is not one of the account's passkeys: fail.
 - For discoverable sign-in, load the passkeys of `identify_discoverable(credential)?` and
