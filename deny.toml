@@ -30,8 +30,9 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
-    # latchkey is sans-IO: none of these may come back as dependencies.
-    { name = "tokio" },
+    # latchkey is sans-IO: none of these may come back as dependencies. tokio is allowed only
+    # under the software authenticator the passkey tests use (a dev-dependency).
+    { name = "tokio", wrappers = ["webauthn-authenticator-rs", "tokio-stream", "tokio-util"] },
     { name = "sqlx" },
     { name = "axum" },
     { name = "hyper" },
