@@ -96,7 +96,7 @@
 pub mod account;
 pub mod audit;
 mod config;
-mod error;
+pub mod error;
 pub mod flow;
 pub mod http;
 mod ids;

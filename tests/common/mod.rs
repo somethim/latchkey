@@ -8,6 +8,7 @@
     clippy::indexing_slicing
 )]
 
+use latchkey::error::ConflictReason;
 use std::collections::{HashMap, HashSet};
 
 use latchkey::account::{Account, Email, Factors, Lockout, NewAccount, Role};
@@ -269,7 +270,7 @@ impl App {
                 }
                 Effect::CreateAccount(account) => {
                     if self.id_of(account.email.as_str()).is_some() {
-                        return Err(Error::Conflict("email_taken"));
+                        return Err(Error::Conflict(ConflictReason::EmailTaken));
                     }
                     self.rows.insert(
                         account.id,

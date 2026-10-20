@@ -5,6 +5,7 @@
 //! Start --Send--> Sent
 //! ```
 
+use crate::error::{ConflictReason, InvalidRequestReason};
 use rand_core::CryptoRng;
 use time::OffsetDateTime;
 
@@ -92,7 +93,7 @@ impl Invite {
         }
         let display_name = optional_name(display_name)?.unwrap_or_else(|| email.to_string());
         if email_taken {
-            return Err(Error::Conflict("email_taken").into());
+            return Err(Error::Conflict(ConflictReason::EmailTaken).into());
         }
         let account = NewAccount {
             id: UserId::random(rng),
@@ -126,7 +127,7 @@ impl Invite {
 pub fn optional_name(raw: Option<String>) -> Result<Option<String>, Error> {
     match raw.map(|name| name.trim().to_owned()) {
         Some(name) if name.chars().count() > MAX_NAME_LEN => {
-            Err(Error::InvalidRequest("name_too_long"))
+            Err(Error::InvalidRequest(InvalidRequestReason::NameTooLong))
         }
         Some(name) if name.is_empty() => Ok(None),
         other => Ok(other),

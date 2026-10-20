@@ -20,6 +20,7 @@
 //! # }
 //! ```
 
+use crate::error::{ConfigReason, CryptoReason, InvalidRequestReason};
 use argon2::password_hash::{PasswordHasher as _, PasswordVerifier as _};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand_core::CryptoRng;
@@ -77,7 +78,7 @@ impl PasswordParams {
 
     fn to_argon2(self) -> Result<Params, Error> {
         Params::new(self.memory_kib, self.iterations, self.parallelism, None)
-            .map_err(|_| Error::Config("argon2 parameters"))
+            .map_err(|_| Error::Config(ConfigReason::Argon2Parameters))
     }
 }
 
@@ -116,7 +117,7 @@ impl TryFrom<String> for PasswordHash {
     /// Accepts a PHC string read back from storage.
     fn try_from(phc: String) -> Result<Self, Error> {
         argon2::PasswordHash::new(&phc)
-            .map_err(|_| Error::Crypto("stored password hash is not a PHC string"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::StoredPasswordHash))?;
         Ok(Self(phc))
     }
 }
@@ -306,7 +307,7 @@ fn hash_with<R: CryptoRng + ?Sized>(
     argon2(params.clone())
         .hash_password_with_salt(password.as_bytes(), &salt)
         .map(|hash| PasswordHash(hash.to_string()))
-        .map_err(|_| Error::Crypto("argon2 hashing failed"))
+        .map_err(|_| Error::Crypto(CryptoReason::PasswordHashing))
 }
 
 /// The length policy for new passwords: [`MIN_LEN`] to [`MAX_LEN`] characters.
@@ -323,10 +324,12 @@ fn hash_with<R: CryptoRng + ?Sized>(
 pub fn check_policy(password: &str) -> Result<(), Error> {
     let len = password.chars().count();
     if len < MIN_LEN {
-        return Err(Error::InvalidRequest("password_too_short"));
+        return Err(Error::InvalidRequest(
+            InvalidRequestReason::PasswordTooShort,
+        ));
     }
     if len > MAX_LEN {
-        return Err(Error::InvalidRequest("password_too_long"));
+        return Err(Error::InvalidRequest(InvalidRequestReason::PasswordTooLong));
     }
     Ok(())
 }

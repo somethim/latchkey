@@ -18,6 +18,7 @@
 //! # }
 //! ```
 
+use crate::error::InvalidRequestReason;
 use time::{Duration, OffsetDateTime};
 
 use crate::Error;
@@ -58,7 +59,7 @@ impl std::str::FromStr for Stage {
             "setup" => Ok(Stage::Setup),
             "second_factor" => Ok(Stage::SecondFactor),
             "full" => Ok(Stage::Full),
-            _ => Err(Error::InvalidRequest("stage")),
+            _ => Err(Error::InvalidRequest(InvalidRequestReason::Stage)),
         }
     }
 }
@@ -102,7 +103,7 @@ impl AppMethod {
         if ok {
             Ok(Self(method.to_owned()))
         } else {
-            Err(Error::InvalidRequest("method"))
+            Err(Error::InvalidRequest(InvalidRequestReason::Method))
         }
     }
 

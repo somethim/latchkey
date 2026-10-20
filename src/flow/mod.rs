@@ -31,6 +31,7 @@ pub mod setup;
 pub mod sign_in;
 pub mod step_up;
 
+use crate::error::InvalidRequestReason;
 use rand_core::CryptoRng;
 use time::OffsetDateTime;
 
@@ -328,7 +329,7 @@ impl Refusal {
     }
 }
 
-const UNEXPECTED: Error = Error::InvalidRequest("unexpected_flow_event");
+const UNEXPECTED: Error = Error::InvalidRequest(InvalidRequestReason::UnexpectedFlowEvent);
 
 fn audit(
     kind: AuditKind,

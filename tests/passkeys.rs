@@ -9,6 +9,7 @@
 mod common;
 
 use common::{App, Browser, ORIGIN, OWNER, PASSWORD};
+use latchkey::error::{ConflictReason, InvalidRequestReason};
 use latchkey::flow::LinkKind;
 use latchkey::flow::sign_in::{SignIn, SignInEvent};
 use latchkey::flow::step_up::{StepUp, StepUpEvent};
@@ -68,7 +69,7 @@ impl Key {
         let credential = self
             .inner
             .do_registration(Self::origin(), challenge)
-            .map_err(|_| Error::InvalidRequest("authenticator_refused"))?;
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::PasskeyRejected))?;
         self.credential_id = Some(credential.raw_id.clone());
         let state = ceremony.into_state(session, user, app.now)?;
         rp.finish_registration(&credential, &state, existing)
@@ -202,7 +203,7 @@ fn ceremonies_expire_and_are_bound_to_their_session_and_user() {
             .unwrap()
             .1
     };
-    let unknown = Some(Error::InvalidRequest("unknown_ceremony"));
+    let unknown = Some(Error::InvalidRequest(InvalidRequestReason::UnknownCeremony));
     assert_eq!(
         start(&mut app).into_state(other, owner, app.now).err(),
         unknown
@@ -353,7 +354,7 @@ fn the_same_passkey_cannot_be_registered_twice() {
         .unwrap();
     assert_eq!(
         rp.finish_registration(&credential, &state, &[added]).err(),
-        Some(Error::Conflict("passkey_exists"))
+        Some(Error::Conflict(ConflictReason::PasskeyExists))
     );
 }
 
@@ -407,7 +408,7 @@ fn ceremonies_expose_their_session_binding() {
         ceremony
             .into_browser_state(fake.token.expose_secret(), app.now)
             .err(),
-        Some(Error::InvalidRequest("unknown_ceremony")),
+        Some(Error::InvalidRequest(InvalidRequestReason::UnknownCeremony)),
         "a session-bound ceremony cannot be finished as a browser-bound one"
     );
 }
@@ -442,7 +443,7 @@ fn passkey_sign_in_with_an_allow_list_before_any_session() {
         latchkey::passkey::webauthn_rs::prelude::PasskeyAuthentication,
     > { serde_json::from_str(&stored).unwrap() };
     let other = latchkey::token::issue(&mut app.rng);
-    let unknown = Some(Error::InvalidRequest("unknown_ceremony"));
+    let unknown = Some(Error::InvalidRequest(InvalidRequestReason::UnknownCeremony));
     assert_eq!(
         restore()
             .into_browser_state(other.token.expose_secret(), app.now)
@@ -498,6 +499,6 @@ fn an_allow_list_sign_in_needs_passkeys() {
     let owner = app.owner_id();
     assert_eq!(
         rp.start_sign_in(owner, &[], app.now, &mut app.rng).err(),
-        Some(Error::InvalidRequest("no_passkey"))
+        Some(Error::InvalidRequest(InvalidRequestReason::NoPasskey))
     );
 }

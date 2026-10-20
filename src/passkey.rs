@@ -28,6 +28,7 @@
 //! was used, then seal and store it again
 //! ([`DataKey::seal_passkey`](crate::seal::DataKey::seal_passkey)).
 
+use crate::error::{ConfigReason, ConflictReason, CryptoReason, InvalidRequestReason};
 use rand_core::CryptoRng;
 use time::{Duration, OffsetDateTime};
 use url::Url;
@@ -162,7 +163,7 @@ impl<S> Ceremony<S> {
     }
 }
 
-const UNKNOWN: Error = Error::InvalidRequest("unknown_ceremony");
+const UNKNOWN: Error = Error::InvalidRequest(InvalidRequestReason::UnknownCeremony);
 
 /// The relying party: the app's origin and passkey settings.
 #[derive(Debug)]
@@ -188,7 +189,7 @@ impl RelyingParty {
     pub fn from_parts(rp_id: &str, rp_name: &str, origin: &Url) -> Result<Self, Error> {
         let webauthn = WebauthnBuilder::new(rp_id, origin)
             .and_then(|builder| builder.rp_name(rp_name).build())
-            .map_err(|_| Error::Config("rp_id does not match the origin"))?;
+            .map_err(|_| Error::Config(ConfigReason::RpIdMismatch))?;
         Ok(Self { webauthn })
     }
 
@@ -214,7 +215,7 @@ impl RelyingParty {
         let (challenge, state) = self
             .webauthn
             .start_passkey_registration(user.into_uuid(), user_name, display_name, Some(exclude))
-            .map_err(|_| Error::Crypto("webauthn registration start"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::WebauthnRegistrationStart))?;
         Ok((
             challenge,
             ceremony(state, Binding::Session { session, user }, now, rng),
@@ -237,12 +238,12 @@ impl RelyingParty {
         let passkey = self
             .webauthn
             .finish_passkey_registration(credential, state)
-            .map_err(|_| Error::InvalidRequest("passkey_rejected"))?;
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::PasskeyRejected))?;
         if existing
             .iter()
             .any(|key| key.cred_id() == passkey.cred_id())
         {
-            return Err(Error::Conflict("passkey_exists"));
+            return Err(Error::Conflict(ConflictReason::PasskeyExists));
         }
         Ok(passkey)
     }
@@ -262,12 +263,12 @@ impl RelyingParty {
         rng: &mut R,
     ) -> Result<(RequestChallengeResponse, Ceremony<PasskeyAuthentication>), Error> {
         if passkeys.is_empty() {
-            return Err(Error::InvalidRequest("no_passkey"));
+            return Err(Error::InvalidRequest(InvalidRequestReason::NoPasskey));
         }
         let (challenge, state) = self
             .webauthn
             .start_passkey_authentication(passkeys)
-            .map_err(|_| Error::Crypto("webauthn authentication start"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
         Ok((
             challenge,
             ceremony(state, Binding::Session { session, user }, now, rng),
@@ -321,12 +322,12 @@ impl RelyingParty {
         Error,
     > {
         if passkeys.is_empty() {
-            return Err(Error::InvalidRequest("no_passkey"));
+            return Err(Error::InvalidRequest(InvalidRequestReason::NoPasskey));
         }
         let (challenge, state) = self
             .webauthn
             .start_passkey_authentication(passkeys)
-            .map_err(|_| Error::Crypto("webauthn authentication start"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
         let (ceremony, token) = browser_ceremony(state, Some(user), now, rng);
         Ok((challenge, ceremony, token))
     }
@@ -354,7 +355,7 @@ impl RelyingParty {
         let (challenge, state) = self
             .webauthn
             .start_discoverable_authentication()
-            .map_err(|_| Error::Crypto("webauthn discoverable start"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::WebauthnDiscoverableStart))?;
         let (ceremony, token) = browser_ceremony(state, None, now, rng);
         Ok((challenge, ceremony, token))
     }

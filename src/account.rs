@@ -20,6 +20,7 @@
 //! assert!(lockout.check(now).is_err());
 //! ```
 
+use crate::error::{ConflictReason, InvalidRequestReason};
 use time::{Duration, OffsetDateTime};
 
 use crate::Error;
@@ -54,7 +55,7 @@ impl Email {
         if valid {
             Ok(Self(email))
         } else {
-            Err(Error::InvalidRequest("email"))
+            Err(Error::InvalidRequest(InvalidRequestReason::Email))
         }
     }
 
@@ -142,7 +143,7 @@ impl std::str::FromStr for Role {
         match raw {
             "owner" => Ok(Role::Owner),
             "member" => Ok(Role::Member),
-            _ => Err(Error::InvalidRequest("role")),
+            _ => Err(Error::InvalidRequest(InvalidRequestReason::Role)),
         }
     }
 }
@@ -215,7 +216,7 @@ impl Factors {
             return Err(Error::NotFound);
         }
         if self.passkeys == 0 {
-            return Err(Error::Conflict("last_factor"));
+            return Err(Error::Conflict(ConflictReason::LastFactor));
         }
         Ok(())
     }
@@ -227,7 +228,7 @@ impl Factors {
     /// [`Error::Conflict`] with `last_factor`.
     pub const fn may_remove_passkey(&self) -> Result<(), Error> {
         if !self.totp && self.passkeys <= 1 {
-            return Err(Error::Conflict("last_factor"));
+            return Err(Error::Conflict(ConflictReason::LastFactor));
         }
         Ok(())
     }
@@ -536,7 +537,7 @@ mod tests {
         };
         assert_eq!(
             totp_only.may_remove_totp(),
-            Err(Error::Conflict("last_factor"))
+            Err(Error::Conflict(ConflictReason::LastFactor))
         );
         let one_passkey = Factors {
             password: true,
@@ -545,7 +546,7 @@ mod tests {
         };
         assert_eq!(
             one_passkey.may_remove_passkey(),
-            Err(Error::Conflict("last_factor"))
+            Err(Error::Conflict(ConflictReason::LastFactor))
         );
         assert_eq!(one_passkey.may_remove_totp(), Err(Error::NotFound));
         let both = Factors {

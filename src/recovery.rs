@@ -19,6 +19,7 @@
 //! # }
 //! ```
 
+use crate::error::InvalidRequestReason;
 use rand_core::CryptoRng;
 use zeroize::Zeroize;
 
@@ -70,7 +71,7 @@ impl TryFrom<&[u8]> for RecoveryCodeHash {
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         <[u8; 32]>::try_from(bytes)
             .map(Self)
-            .map_err(|_| crate::Error::InvalidRequest("recovery_hash_length"))
+            .map_err(|_| crate::Error::InvalidRequest(InvalidRequestReason::RecoveryHashLength))
     }
 }
 

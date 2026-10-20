@@ -21,6 +21,7 @@
 //! # }
 //! ```
 
+use crate::error::InvalidRequestReason;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand_core::CryptoRng;
@@ -116,7 +117,7 @@ impl TryFrom<&[u8]> for TokenHash {
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         <[u8; 32]>::try_from(bytes)
             .map(Self)
-            .map_err(|_| crate::Error::InvalidRequest("token_hash_length"))
+            .map_err(|_| crate::Error::InvalidRequest(InvalidRequestReason::TokenHashLength))
     }
 }
 

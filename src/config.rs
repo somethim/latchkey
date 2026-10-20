@@ -13,6 +13,7 @@
 //! # Ok::<(), latchkey::Error>(())
 //! ```
 
+use crate::error::ConfigReason;
 use time::Duration;
 use url::Url;
 
@@ -282,23 +283,22 @@ impl ConfigBuilder {
     /// [`Error::InvalidRequest`] with `email` for a bad owner
     /// address.
     pub fn build(self) -> Result<Config, Error> {
-        let origin = Url::parse(&self.origin).map_err(|_| Error::Config("origin is not a URL"))?;
+        let origin =
+            Url::parse(&self.origin).map_err(|_| Error::Config(ConfigReason::OriginNotUrl))?;
         let host = origin
             .host_str()
-            .ok_or(Error::Config("origin has no host"))?
+            .ok_or(Error::Config(ConfigReason::OriginHasNoHost))?
             .to_owned();
         let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
         let plain_local = origin.scheme() == "http" && local;
         if origin.scheme() != "https" && !plain_local {
-            return Err(Error::Config("origin must be https"));
+            return Err(Error::Config(ConfigReason::OriginNotHttps));
         }
         if self.insecure_localhost_cookies && !plain_local {
-            return Err(Error::Config(
-                "insecure localhost cookies need an http://localhost, http://127.0.0.1 or http://[::1] origin",
-            ));
+            return Err(Error::Config(ConfigReason::InsecureCookiesNotLocalhost));
         }
         let owner_email =
-            Email::parse(&self.owner_email).map_err(|_| Error::Config("owner email"))?;
+            Email::parse(&self.owner_email).map_err(|_| Error::Config(ConfigReason::OwnerEmail))?;
         let cookie = |name: &str| {
             if self.insecure_localhost_cookies {
                 CookieName::insecure_localhost(name)
@@ -313,17 +313,15 @@ impl ConfigBuilder {
             || cookie_name == ceremony_cookie_name
             || device_cookie_name == ceremony_cookie_name
         {
-            return Err(Error::Config("cookie names must differ"));
+            return Err(Error::Config(ConfigReason::CookieNamesEqual));
         }
         let join = |path: &str| {
             origin
                 .join(path)
-                .map_err(|_| Error::Config("a path does not join onto the origin"))
+                .map_err(|_| Error::Config(ConfigReason::PathDoesNotJoin))
         };
         if self.step_up_failures == (StepUpFailures::PerSession { limit: 0 }) {
-            return Err(Error::Config(
-                "the step-up failure limit must be at least 1",
-            ));
+            return Err(Error::Config(ConfigReason::StepUpLimitZero));
         }
         let rp_id = self.rp_id.unwrap_or(host);
         Ok(Config {
@@ -567,9 +565,7 @@ mod tests {
                 .step_up_failures(StepUpFailures::PerSession { limit: 0 })
                 .build()
                 .err(),
-            Some(Error::Config(
-                "the step-up failure limit must be at least 1"
-            ))
+            Some(Error::Config(ConfigReason::StepUpLimitZero))
         );
         assert!(
             builder()
@@ -605,9 +601,7 @@ mod insecure_localhost_tests {
             assert_eq!(config.ceremony_cookie_name().as_str(), "latchkey_ceremony");
             assert!(!config.cookie_name().is_secure());
         }
-        let refused = Some(Error::Config(
-            "insecure localhost cookies need an http://localhost, http://127.0.0.1 or http://[::1] origin",
-        ));
+        let refused = Some(Error::Config(ConfigReason::InsecureCookiesNotLocalhost));
         for origin in [
             "https://home.example.com",
             "https://localhost:3000",
@@ -623,7 +617,7 @@ mod insecure_localhost_tests {
         ] {
             assert_eq!(
                 dev(origin).err(),
-                Some(Error::Config("origin must be https")),
+                Some(Error::Config(ConfigReason::OriginNotHttps)),
                 "{origin}"
             );
         }

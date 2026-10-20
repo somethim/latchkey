@@ -24,6 +24,7 @@
 //! # }
 //! ```
 
+use crate::error::InvalidRequestReason;
 use rand_core::CryptoRng;
 use time::OffsetDateTime;
 use totp_rs::{Algorithm, Builder, Secret, Totp};
@@ -94,7 +95,9 @@ impl TotpSecret {
         for symbol in symbols {
             let Some(value) = base32_value(symbol) else {
                 bytes.zeroize();
-                return Err(Error::InvalidRequest("totp_secret_base32"));
+                return Err(Error::InvalidRequest(
+                    InvalidRequestReason::TotpSecretBase32,
+                ));
             };
             buffer = (buffer << 5) | u32::from(value);
             bits += 5;
@@ -107,7 +110,9 @@ impl TotpSecret {
         buffer.zeroize();
         if bytes.len() < MIN_SECRET_BYTES {
             bytes.zeroize();
-            return Err(Error::InvalidRequest("totp_secret_too_short"));
+            return Err(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretTooShort,
+            ));
         }
         Ok(Self(bytes))
     }
@@ -132,7 +137,7 @@ impl TotpSecret {
     /// 1970.
     pub fn code_at(&self, at: OffsetDateTime) -> Result<String, Error> {
         let at = u64::try_from(at.unix_timestamp())
-            .map_err(|_| Error::InvalidRequest("time_before_epoch"))?;
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::TimeBeforeEpoch))?;
         Ok(build(self, "latchkey", "")?.generate(at).to_string())
     }
 }
@@ -176,7 +181,7 @@ impl TryFrom<i64> for TotpStep {
     fn try_from(step: i64) -> Result<Self, Error> {
         u64::try_from(step)
             .map(Self)
-            .map_err(|_| Error::InvalidRequest("negative_totp_step"))
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::NegativeTotpStep))
     }
 }
 
@@ -184,7 +189,8 @@ impl TryFrom<TotpStep> for i64 {
     type Error = Error;
 
     fn try_from(step: TotpStep) -> Result<Self, Error> {
-        i64::try_from(step.0).map_err(|_| Error::InvalidRequest("totp_step_overflow"))
+        i64::try_from(step.0)
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::TotpStepOverflow))
     }
 }
 
@@ -249,7 +255,7 @@ fn build(secret: &TotpSecret, issuer: &str, account: &str) -> Result<Totp, Error
         .with_issuer(Some(issuer.replace(':', "")))
         .with_account_name(account.replace(':', ""))
         .build()
-        .map_err(|_| Error::InvalidRequest("totp_secret"))
+        .map_err(|_| Error::InvalidRequest(InvalidRequestReason::TotpSecret))
 }
 
 /// The base32 secret and `otpauth://` URL for an authenticator app. Colons are removed from
@@ -264,7 +270,7 @@ pub fn enrolment(secret: &TotpSecret, issuer: &str, account: &str) -> Result<Enr
         secret_base32: secret.to_base32(),
         otpauth_url: totp
             .to_url()
-            .map_err(|_| Error::InvalidRequest("totp_url"))?,
+            .map_err(|_| Error::InvalidRequest(InvalidRequestReason::TotpUrl))?,
     })
 }
 
@@ -319,7 +325,7 @@ pub fn verify(
 pub fn qr_svg(otpauth_url: &str) -> Result<String, Error> {
     use std::fmt::Write as _;
     let qr = qrcodegen::QrCode::encode_text(otpauth_url, qrcodegen::QrCodeEcc::Medium)
-        .map_err(|_| Error::InvalidRequest("qr_too_long"))?;
+        .map_err(|_| Error::InvalidRequest(InvalidRequestReason::QrTooLong))?;
     let border = 4;
     let size = qr.size() + border * 2;
     let mut path = String::new();
@@ -345,7 +351,8 @@ pub fn qr_svg(otpauth_url: &str) -> Result<String, Error> {
 #[cfg(feature = "qr-png")]
 #[cfg_attr(docsrs, doc(cfg(feature = "qr-png")))]
 pub fn qr_png(otpauth_url: &str) -> Result<Vec<u8>, Error> {
-    qrcodegen_image::draw_png(otpauth_url).map_err(|_| Error::InvalidRequest("qr_png"))
+    qrcodegen_image::draw_png(otpauth_url)
+        .map_err(|_| Error::InvalidRequest(InvalidRequestReason::QrPng))
 }
 
 #[cfg(test)]
@@ -442,7 +449,9 @@ mod tests {
         let padded = TotpSecret::from_base32("MZXW6YTBOI======MZXW6YTBOI======");
         assert_eq!(
             padded.err(),
-            Some(Error::InvalidRequest("totp_secret_base32")),
+            Some(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretBase32
+            )),
             "padding only at the end"
         );
         let foobar = TotpSecret::from_base32("MZXW6YTBOJWW6YTBOJWW6YTBOI======")?;
@@ -458,15 +467,21 @@ mod tests {
     fn base32_secrets_must_be_valid_and_long_enough() {
         assert_eq!(
             TotpSecret::from_base32("JBSWY3DPEHPK3PXP").err(),
-            Some(Error::InvalidRequest("totp_secret_too_short"))
+            Some(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretTooShort
+            ))
         );
         assert_eq!(
             TotpSecret::from_base32("JBSWY3DPEHPK3PXP1BSWY3DPEHPK3PXP").err(),
-            Some(Error::InvalidRequest("totp_secret_base32"))
+            Some(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretBase32
+            ))
         );
         assert_eq!(
             TotpSecret::from_base32("").err(),
-            Some(Error::InvalidRequest("totp_secret_too_short"))
+            Some(Error::InvalidRequest(
+                InvalidRequestReason::TotpSecretTooShort
+            ))
         );
         assert!(TotpSecret::from_base32("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PX\u{e9}").is_err());
     }

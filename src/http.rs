@@ -18,6 +18,7 @@
 //! assert_eq!(cookie, Some("abc"));
 //! ```
 
+use crate::error::ConfigReason;
 use std::net::IpAddr;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -59,7 +60,7 @@ impl CookieName {
     /// [`Error::Config`] when it lacks `__Host-` or has characters a cookie name cannot.
     pub fn new(name: &str) -> Result<Self, Error> {
         if !name.starts_with(HOST_PREFIX) {
-            return Err(Error::Config("cookie name must start with __Host-"));
+            return Err(Error::Config(ConfigReason::CookieNamePrefix));
         }
         check_token(name)?;
         Ok(Self {
@@ -73,7 +74,7 @@ impl CookieName {
     pub(crate) fn insecure_localhost(name: &str) -> Result<Self, Error> {
         let bare = name.strip_prefix(HOST_PREFIX).unwrap_or(name);
         if bare.is_empty() || bare.starts_with("__Secure-") || bare.starts_with(HOST_PREFIX) {
-            return Err(Error::Config("cookie name has invalid characters"));
+            return Err(Error::Config(ConfigReason::CookieNameCharacters));
         }
         check_token(bare)?;
         Ok(Self {
@@ -103,7 +104,7 @@ fn check_token(name: &str) -> Result<(), Error> {
     if token {
         Ok(())
     } else {
-        Err(Error::Config("cookie name has invalid characters"))
+        Err(Error::Config(ConfigReason::CookieNameCharacters))
     }
 }
 

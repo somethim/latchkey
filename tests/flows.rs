@@ -11,6 +11,7 @@ mod common;
 use common::{App, Browser, OWNER, PASSWORD, code_of};
 use latchkey::account::Email;
 use latchkey::audit::AuditKind;
+use latchkey::error::{ConflictReason, InvalidRequestReason};
 use latchkey::flow::invite::{Invite, InviteEvent};
 use latchkey::flow::setup::Setup;
 use latchkey::flow::sign_in::{SignIn, SignInEvent};
@@ -127,16 +128,22 @@ fn setup_cannot_complete_without_password_and_a_second_factor() {
         .unwrap();
     assert_eq!(
         app.finish_setup(&mut browser).err(),
-        Some(Error::InvalidRequest("password_required"))
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::PasswordRequired
+        ))
     );
     assert_eq!(
         app.setup_password(&mut browser, "short").err(),
-        Some(Error::InvalidRequest("password_too_short"))
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::PasswordTooShort
+        ))
     );
     app.setup_password(&mut browser, PASSWORD).unwrap();
     assert_eq!(
         app.finish_setup(&mut browser).err(),
-        Some(Error::InvalidRequest("second_factor_required"))
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::SecondFactorRequired
+        ))
     );
 }
 
@@ -492,7 +499,9 @@ fn events_out_of_order_are_refused() {
     );
     assert_eq!(
         refused.err().map(|r| r.error),
-        Some(Error::InvalidRequest("unexpected_flow_event"))
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::UnexpectedFlowEvent
+        ))
     );
 }
 
@@ -1033,7 +1042,7 @@ fn owner_invites_a_family_member_who_sets_up() {
     assert!(app.account(member.id).unwrap().active);
     assert_eq!(
         invite(&mut app, &owner, "kid@example.com").err(),
-        Some(Error::Conflict("email_taken"))
+        Some(Error::Conflict(ConflictReason::EmailTaken))
     );
     assert_eq!(
         invite(&mut app, &kid, "other@example.com").err(),
@@ -1177,7 +1186,9 @@ fn by_default_a_password_only_account_gets_no_session() {
     let mut browser = Browser::default();
     assert_eq!(
         setup_with_password_only(&mut app, &mut browser).err(),
-        Some(Error::InvalidRequest("second_factor_required"))
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::SecondFactorRequired
+        ))
     );
     let mut owner = app.account(app.owner_id()).unwrap();
     owner.active = true;

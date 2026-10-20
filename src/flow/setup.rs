@@ -11,6 +11,7 @@
 //! [`crate::session::Access::Enrolling`]. Rebuild `InSetup` on each
 //! request with [`Setup::resume`] from the stored setup session and the account as it is now.
 
+use crate::error::InvalidRequestReason;
 use rand_core::CryptoRng;
 use time::OffsetDateTime;
 
@@ -206,10 +207,14 @@ impl Setup {
             ) => {
                 in_setup(config, &account, &session, now)?;
                 if !account.factors.password {
-                    return Err(Error::InvalidRequest("password_required").into());
+                    return Err(
+                        Error::InvalidRequest(InvalidRequestReason::PasswordRequired).into(),
+                    );
                 }
                 if !account.factors.are_sufficient(config.password_only()) {
-                    return Err(Error::InvalidRequest("second_factor_required").into());
+                    return Err(
+                        Error::InvalidRequest(InvalidRequestReason::SecondFactorRequired).into(),
+                    );
                 }
                 let issued = recovery::generate(rng);
                 let mut effects = vec![

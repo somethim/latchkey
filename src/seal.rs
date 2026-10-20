@@ -23,6 +23,7 @@
 //! # }
 //! ```
 
+use crate::error::{ConfigReason, CryptoReason};
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
@@ -119,13 +120,13 @@ pub fn classify_text(stored: &str) -> Stored {
 /// [`Error::Config`] naming the problem.
 pub fn check_keys(secret_key: &[u8; 32], data_key: &[u8; 32]) -> Result<(), Error> {
     if secret_key == &[0u8; 32] {
-        return Err(Error::Config("secret key is all zeroes"));
+        return Err(Error::Config(ConfigReason::SecretKeyZero));
     }
     if data_key == &[0u8; 32] {
-        return Err(Error::Config("data key is all zeroes"));
+        return Err(Error::Config(ConfigReason::DataKeyZero));
     }
     if data_key == secret_key {
-        return Err(Error::Config("data key must differ from the secret key"));
+        return Err(Error::Config(ConfigReason::KeysEqual));
     }
     Ok(())
 }
@@ -157,7 +158,7 @@ impl DataKey {
                     aad: &aad.0,
                 },
             )
-            .map_err(|_| Error::Crypto("encryption failed"))?;
+            .map_err(|_| Error::Crypto(CryptoReason::Encryption))?;
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ciphertext);
@@ -255,7 +256,7 @@ impl DataKey {
     pub fn open_totp(&self, user: UserId, stored: &[u8]) -> Result<TotpSecret, Error> {
         self.open_bytes(&Aad::totp(user), stored)
             .map(TotpSecret::from_bytes)
-            .ok_or(Error::Crypto("a TOTP secret does not decrypt"))
+            .ok_or(Error::Crypto(CryptoReason::TotpDecrypt))
     }
 
     /// Seals a passkey as JSON text.
@@ -272,8 +273,8 @@ impl DataKey {
         id: PasskeyId,
         passkey: &webauthn_rs::prelude::Passkey,
     ) -> Result<String, Error> {
-        let json =
-            serde_json::to_string(passkey).map_err(|_| Error::Crypto("passkey serialisation"))?;
+        let json = serde_json::to_string(passkey)
+            .map_err(|_| Error::Crypto(CryptoReason::PasskeySerialisation))?;
         self.seal_text(rng, &Aad::passkey(user, id), &json)
     }
 
@@ -292,8 +293,8 @@ impl DataKey {
     ) -> Result<webauthn_rs::prelude::Passkey, Error> {
         let json = self
             .open_text(&Aad::passkey(user, id), stored)
-            .ok_or(Error::Crypto("a passkey does not decrypt"))?;
-        serde_json::from_str(&json).map_err(|_| Error::Crypto("a passkey does not parse"))
+            .ok_or(Error::Crypto(CryptoReason::PasskeyDecrypt))?;
+        serde_json::from_str(&json).map_err(|_| Error::Crypto(CryptoReason::PasskeyParse))
     }
 }
 
