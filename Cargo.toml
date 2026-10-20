@@ -1,56 +1,96 @@
 [package]
 name = "latchkey"
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 edition = "2024"
 rust-version = "1.88"
-description = "Sign-in for a small axum app: password with a second factor, passkeys, TOTP, email sign-in links, recovery codes and first-open owner setup"
+description = "Sans-IO sign-in building blocks and policy: Argon2id passwords, TOTP, recovery codes, passkeys, tokens, sealing, cookies, lockout, rate limits and sign-in flows as pure state machines"
 repository = "https://github.com/somethim/latchkey"
+documentation = "https://docs.rs/latchkey"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-keywords = ["authentication", "axum", "passkey", "totp", "webauthn"]
-categories = ["authentication", "web-programming::http-server"]
-exclude = ["/.github", "/fuzz"]
+keywords = ["authentication", "sans-io", "passkey", "totp", "argon2"]
+categories = ["authentication", "cryptography"]
+include = [
+    "/src",
+    "/examples",
+    "/tests",
+    "/skills",
+    "/Symposium.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["os-rng"]
+# `latchkey::os_rng()`: a ChaCha12 generator seeded from the operating system.
+os-rng = ["dep:rand"]
+# Serialize/Deserialize for the state and record types the app stores.
+serde = ["dep:serde", "time/serde", "uuid/serde", "url/serde"]
+# Passkeys through webauthn-rs, which links OpenSSL.
+passkeys = ["serde", "dep:webauthn-rs", "dep:serde_json"]
+# `totp::qr_svg`.
+qr = ["dep:qrcodegen"]
+# `totp::qr_png`; pulls in the `image` crate.
+qr-png = ["qr", "dep:qrcodegen-image"]
+# Exposes `latchkey::fuzzing` for the cargo-fuzz target in `fuzz/`; not a public API.
+fuzzing = []
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
-argon2 = "0.6.0"
-async-trait = "0.1.89"
-axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 base64 = "0.22.1"
 hmac = "0.13.0"
-rand = "0.10.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+qrcodegen = { version = "1.8.0", optional = true }
+qrcodegen-image = { version = "1.5.2", optional = true }
+rand = { version = "0.10.3", optional = true, default-features = false, features = ["std_rng", "sys_rng"] }
+rand_core = "0.10.1"
+serde = { version = "1.0.228", optional = true, features = ["derive"] }
+serde_json = { version = "1.0.145", optional = true }
 sha2 = "0.11.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 subtle = "2.6.1"
 thiserror = "2.0.17"
-time = { version = "0.3.44", features = ["serde"] }
-tokio = { version = "1.48.0", features = ["sync", "rt", "time"] }
+time = { version = "0.3.44", features = ["formatting"] }
 totp-rs = { version = "6.0.0", default-features = false, features = ["std", "otpauth"] }
-tracing = "0.1.41"
 url = "2.5.7"
-uuid = { version = "1.18.1", features = ["v4", "serde"] }
-webauthn-rs = { version = "0.5.5", features = ["conditional-ui"] }
-
-[features]
-# Exposes `latchkey::fuzzing` for the cargo-fuzz targets in `fuzz/`; not a public API.
-fuzzing = []
+uuid = "1.18.1"
+webauthn-rs = { version = "0.5.5", optional = true, features = ["conditional-ui", "danger-allow-state-serialisation"] }
+zeroize = "1.8.1"
 
 [dev-dependencies]
-axum = { version = "0.8.9", features = ["macros"] }
-http-body-util = "0.1.3"
+rand = { version = "0.10.3", default-features = false, features = ["std_rng", "sys_rng"] }
 proptest = "1.12.0"
-tokio = { version = "1.48.0", features = ["full"] }
-tower = { version = "0.5.2", features = ["util"] }
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+serde_json = "1.0.145"
 webauthn-authenticator-rs = { version = "0.5.5", features = ["softpasskey"] }
 webauthn-rs-proto = "0.5.5"
 
+[[example]]
+name = "password_totp"
+required-features = ["os-rng"]
+
+[[example]]
+name = "email_link"
+required-features = ["os-rng"]
+
+[[example]]
+name = "passkey_registration"
+required-features = ["os-rng", "passkeys"]
+
+[[test]]
+name = "passkeys"
+required-features = ["passkeys"]
+
 [lints.rust]
 unsafe_code = "forbid"
+missing_docs = "deny"
 
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+indexing_slicing = "deny"

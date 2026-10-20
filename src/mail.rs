@@ -1,27 +1,70 @@
-use std::sync::Mutex;
-use std::time::Duration;
+//! Mail content as values. The flows emit [`Effect::SendMail`](crate::flow::Effect::SendMail)
+//! with a [`Mail`]; the app sends it however it likes, with [`Mail::subject`] and
+//! [`Mail::text`] or its own templates built from the fields.
+//!
+//! ```
+//! use latchkey::mail::{Mail, MailKind};
+//! use latchkey::Email;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mail = Mail {
+//!     kind: MailKind::SignInLink,
+//!     to: Email::parse("owner@example.com")?,
+//!     link: "https://home.example.com/sign-in/link?token=abc".parse()?,
+//!     expires_at: Some(time::OffsetDateTime::from_unix_timestamp(1_800_000_900)?),
+//!     sign_in: None,
+//! };
+//! assert_eq!(mail.subject(), "Your sign-in link");
+//! assert!(mail.text().contains("expires at 2027-01-15T08:15:00Z"));
+//! # Ok(())
+//! # }
+//! ```
 
-use async_trait::async_trait;
 use time::OffsetDateTime;
-use tokio::sync::Notify;
 use url::Url;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::account::Email;
+use crate::session::SignInMethod;
+
+/// Which mail it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
 pub enum MailKind {
-    /// First-open owner setup.
+    /// First-open owner setup link.
     Setup,
+    /// Sign-in link.
     SignInLink,
+    /// Invite link for a new member.
     Invite,
     /// A sign-in completed on a browser the account had not used before.
     NewDevice,
 }
 
-/// What to send; wording and layout are up to the app's [`Mailer`].
+/// The details a new-device mail reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SignInDetails {
+    /// When the sign-in completed.
+    pub at: OffsetDateTime,
+    /// How.
+    pub method: SignInMethod,
+    /// The browser's user agent.
+    pub user_agent: Option<String>,
+}
+
+/// A mail to send. For link mails, `link` carries the token in its query string: it is a
+/// bearer secret, so `Debug` leaves the link out.
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mail {
+    /// Which mail.
     pub kind: MailKind,
-    pub to: String,
-    /// The page that redeems the token, or for [`MailKind::NewDevice`] the sessions page.
+    /// The recipient.
+    pub to: Email,
+    /// The page that redeems the token (`?token=`), or for [`MailKind::NewDevice`] the
+    /// sessions page.
     pub link: Url,
     /// When the link stops working; `None` for notifications.
     pub expires_at: Option<OffsetDateTime>,
@@ -29,12 +72,15 @@ pub struct Mail {
     pub sign_in: Option<SignInDetails>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignInDetails {
-    pub at: OffsetDateTime,
-    /// Such as `password+totp`, `passkey` or `email_link`.
-    pub method: String,
-    pub user_agent: Option<String>,
+impl std::fmt::Debug for Mail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mail")
+            .field("kind", &self.kind)
+            .field("to", &self.to)
+            .field("expires_at", &self.expires_at)
+            .field("sign_in", &self.sign_in)
+            .finish_non_exhaustive()
+    }
 }
 
 fn rfc3339(at: OffsetDateTime) -> String {
@@ -49,6 +95,8 @@ fn printable(raw: &str) -> String {
 }
 
 impl Mail {
+    /// The subject line.
+    #[must_use]
     pub fn subject(&self) -> &'static str {
         match self.kind {
             MailKind::Setup => "Set up your sign-in",
@@ -58,6 +106,9 @@ impl Mail {
         }
     }
 
+    /// The plain-text body. Control characters from the user agent are removed, so it
+    /// cannot inject headers or lines.
+    #[must_use]
     pub fn text(&self) -> String {
         let action = match self.kind {
             MailKind::Setup => "set up your sign-in",
@@ -72,6 +123,15 @@ impl Mail {
         )
     }
 
+    /// The token in the link, if any; for tests.
+    #[must_use]
+    pub fn link_token(&self) -> Option<String> {
+        self.link
+            .query_pairs()
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.into_owned())
+    }
+
     fn new_device_text(&self) -> String {
         let details = self
             .sign_in
@@ -80,12 +140,11 @@ impl Mail {
                 format!(
                     "When: {}\nMethod: {}\nBrowser: {}\n\n",
                     rfc3339(details.at),
-                    printable(&details.method),
+                    printable(details.method.as_str()),
                     details
                         .user_agent
                         .as_deref()
-                        .map(printable)
-                        .unwrap_or_else(|| "unknown".to_owned()),
+                        .map_or_else(|| "unknown".to_owned(), printable),
                 )
             })
             .unwrap_or_default();
@@ -96,84 +155,21 @@ impl Mail {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("mail delivery failed: {0}")]
-pub struct MailError(pub String);
-
-#[async_trait]
-pub trait Mailer: Send + Sync + 'static {
-    async fn send(&self, mail: Mail) -> Result<(), MailError>;
-}
-
-/// Keeps every mail in memory instead of sending it.
-#[derive(Debug, Default)]
-pub struct TestMailer {
-    sent: Mutex<Vec<Mail>>,
-    notify: Notify,
-}
-
-impl TestMailer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn sent(&self) -> Vec<Mail> {
-        self.sent
-            .lock()
-            .map(|sent| sent.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
-    }
-
-    /// Mails go out on a background task; this waits up to `timeout` for the `n`-th one.
-    pub async fn wait_for(&self, n: usize, timeout: Duration) -> Option<Mail> {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.notify.notified();
-                if let Some(mail) = self.sent().get(n.saturating_sub(1)) {
-                    return mail.clone();
-                }
-                notified.await;
-            }
-        })
-        .await
-        .ok()
-    }
-
-    pub fn token_of(mail: &Mail) -> Option<String> {
-        mail.link
-            .query_pairs()
-            .find(|(key, _)| key == "token")
-            .map(|(_, value)| value.into_owned())
-    }
-}
-
-#[async_trait]
-impl Mailer for TestMailer {
-    async fn send(&self, mail: Mail) -> Result<(), MailError> {
-        match self.sent.lock() {
-            Ok(mut sent) => sent.push(mail),
-            Err(poisoned) => poisoned.into_inner().push(mail),
-        }
-        self.notify.notify_waiters();
-        Ok(())
-    }
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn new_device_text_names_the_sign_in_and_strips_control_characters() {
+    fn new_device_text_names_the_sign_in_and_strips_control_characters()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mail = Mail {
             kind: MailKind::NewDevice,
-            to: "o@example.com".into(),
-            link: Url::parse("https://home.example.com/settings/sessions").unwrap(),
+            to: Email::parse("o@example.com")?,
+            link: Url::parse("https://home.example.com/settings/sessions")?,
             expires_at: None,
             sign_in: Some(SignInDetails {
-                at: OffsetDateTime::from_unix_timestamp(1_900_000_000).unwrap(),
-                method: "passkey".into(),
+                at: OffsetDateTime::from_unix_timestamp(1_900_000_000)?,
+                method: SignInMethod::Passkey,
                 user_agent: Some("Evil\r\nBcc: x@y".into()),
             }),
         };
@@ -182,5 +178,22 @@ mod tests {
         assert!(text.contains("Browser: EvilBcc: x@y\n"));
         assert!(text.contains("https://home.example.com/settings/sessions"));
         assert!(text.contains("2030-03-17T17:46:40Z"));
+        assert_eq!(mail.subject(), "New sign-in to your account");
+        Ok(())
+    }
+
+    #[test]
+    fn link_mails_hide_the_token_from_debug() -> Result<(), Box<dyn std::error::Error>> {
+        let mail = Mail {
+            kind: MailKind::SignInLink,
+            to: Email::parse("o@example.com")?,
+            link: Url::parse("https://home.example.com/sign-in/link?token=SECRET")?,
+            expires_at: Some(OffsetDateTime::from_unix_timestamp(1_900_000_000)?),
+            sign_in: None,
+        };
+        assert!(!format!("{mail:?}").contains("SECRET"));
+        assert_eq!(mail.link_token().as_deref(), Some("SECRET"));
+        assert!(mail.text().contains("expires at 2030-03-17T17:46:40Z"));
+        Ok(())
     }
 }

@@ -1,80 +1,254 @@
-use std::sync::Arc;
+//! Argon2id password hashing, with a dummy hash for accounts that do not exist.
+//!
+//! Hashing is deliberately slow and memory-hungry (64 MiB by default). It is pure computation,
+//! but run it on a blocking thread and limit how many run at once (latchkey 0.2 ran one at a
+//! time) so a burst of sign-ins cannot exhaust memory.
+//!
+//! ```
+//! use latchkey::password::{PasswordHasher, PasswordParams};
+//!
+//! # fn main() -> Result<(), latchkey::Error> {
+//! let mut rng = latchkey::os_rng()?;
+//! # let params = PasswordParams::new(64, 1, 1)?;
+//! let hasher = PasswordHasher::new(params, &mut rng)?;
+//! let stored = hasher.hash_new_password("correct horse battery", &mut rng)?;
+//! assert!(hasher.verify("correct horse battery", Some(&stored)));
+//! assert!(!hasher.verify("wrong horse battery", Some(&stored)));
+//! // An unknown account still costs a full hash, and never verifies.
+//! assert!(!hasher.verify("correct horse battery", None));
+//! # Ok(())
+//! # }
+//! ```
 
 use argon2::password_hash::{PasswordHasher as _, PasswordVerifier as _};
 use argon2::{Algorithm, Argon2, Params, Version};
-use tokio::sync::Semaphore;
+use rand_core::CryptoRng;
+use zeroize::Zeroize;
 
-use crate::config::PasswordParams;
-use crate::crypto::{hex, random_bytes};
-use crate::error::Error;
+use crate::Error;
 
-pub(crate) const MIN_LEN: usize = 12;
-pub(crate) const MAX_LEN: usize = 1024;
+/// The shortest password [`check_policy`] accepts, in characters.
+pub const MIN_LEN: usize = 12;
+/// The longest password [`check_policy`] accepts, in characters.
+pub const MAX_LEN: usize = 1024;
+const SALT_LEN: usize = 16;
 
-/// Argon2id with one hashing slot: concurrent sign-ins queue instead of exhausting memory.
-#[derive(Clone)]
-pub(crate) struct Hasher {
-    params: Params,
-    slot: Arc<Semaphore>,
-    dummy: Arc<str>,
+/// Argon2id cost parameters, validated on construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasswordParams {
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
 }
 
-impl Hasher {
-    pub(crate) async fn new(params: PasswordParams) -> Result<Self, Error> {
-        let params = Params::new(
-            params.memory_kib,
-            params.iterations,
-            params.parallelism,
-            None,
-        )
-        .map_err(|_| Error::Config("argon2 parameters"))?;
-        let mut hasher = Self {
-            params,
-            slot: Arc::new(Semaphore::new(1)),
-            dummy: Arc::from(""),
+impl PasswordParams {
+    /// Memory in KiB, iterations (t) and lanes (p).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when Argon2 rejects the combination.
+    pub fn new(memory_kib: u32, iterations: u32, parallelism: u32) -> Result<Self, Error> {
+        let params = Self {
+            memory_kib,
+            iterations,
+            parallelism,
         };
-        let dummy = hasher.hash(hex(&random_bytes::<32>())).await?;
-        hasher.dummy = Arc::from(dummy);
-        Ok(hasher)
+        params.to_argon2()?;
+        Ok(params)
     }
 
-    fn argon2(params: Params) -> Argon2<'static> {
-        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    /// Memory cost in KiB.
+    #[must_use]
+    pub const fn memory_kib(&self) -> u32 {
+        self.memory_kib
     }
 
-    pub(crate) async fn hash(&self, password: String) -> Result<String, Error> {
-        let _slot = self.slot.acquire().await.map_err(Error::internal)?;
-        let params = self.params.clone();
-        tokio::task::spawn_blocking(move || {
-            Self::argon2(params)
-                .hash_password(password.as_bytes())
-                .map(|hash| hash.to_string())
-                .map_err(Error::internal)
-        })
-        .await
-        .map_err(Error::internal)?
+    /// Number of passes.
+    #[must_use]
+    pub const fn iterations(&self) -> u32 {
+        self.iterations
     }
 
-    /// Runs the full hash even when there is no stored hash, so timing does not tell
-    /// known accounts from unknown ones.
-    pub(crate) async fn verify(&self, password: &str, stored: Option<&str>) -> Result<bool, Error> {
-        let _slot = self.slot.acquire().await.map_err(Error::internal)?;
-        let params = self.params.clone();
-        let is_real = stored.is_some();
-        let stored = stored.map_or_else(|| self.dummy.to_string(), str::to_owned);
-        let password = password.to_owned();
-        let matched = tokio::task::spawn_blocking(move || {
-            Self::argon2(params)
-                .verify_password(password.as_bytes(), stored.as_str())
-                .is_ok()
-        })
-        .await
-        .map_err(Error::internal)?;
-        Ok(matched && is_real)
+    /// Degree of parallelism.
+    #[must_use]
+    pub const fn parallelism(&self) -> u32 {
+        self.parallelism
+    }
+
+    fn to_argon2(self) -> Result<Params, Error> {
+        Params::new(self.memory_kib, self.iterations, self.parallelism, None)
+            .map_err(|_| Error::Config("argon2 parameters"))
     }
 }
 
-pub(crate) fn check_policy(password: &str) -> Result<(), Error> {
+impl Default for PasswordParams {
+    /// 64 MiB, t=3, p=2.
+    fn default() -> Self {
+        Self {
+            memory_kib: 64 * 1024,
+            iterations: 3,
+            parallelism: 2,
+        }
+    }
+}
+
+/// A stored password hash in PHC string format (`$argon2id$v=19$...`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasswordHash(String);
+
+impl PasswordHash {
+    /// The PHC string to store.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The PHC string, by value.
+    #[must_use]
+    pub fn into_string(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl TryFrom<String> for PasswordHash {
+    type Error = Error;
+
+    /// Accepts a PHC string read back from storage.
+    fn try_from(phc: String) -> Result<Self, Error> {
+        argon2::PasswordHash::new(&phc)
+            .map_err(|_| Error::Crypto("stored password hash is not a PHC string"))?;
+        Ok(Self(phc))
+    }
+}
+
+impl TryFrom<&str> for PasswordHash {
+    type Error = Error;
+
+    fn try_from(phc: &str) -> Result<Self, Error> {
+        Self::try_from(phc.to_owned())
+    }
+}
+
+impl std::fmt::Debug for PasswordHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PasswordHash(<redacted>)")
+    }
+}
+
+/// Hashes and verifies passwords with Argon2id under fixed parameters.
+///
+/// Cheap to clone; holds the parameters and a dummy hash.
+#[derive(Clone)]
+pub struct PasswordHasher {
+    params: Params,
+    dummy: PasswordHash,
+}
+
+impl std::fmt::Debug for PasswordHasher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordHasher")
+            .field("params", &self.params)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PasswordHasher {
+    /// Builds the hasher and the dummy hash that [`verify`](Self::verify) checks unknown
+    /// accounts against. This runs one full hash.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] for unusable parameters, [`Error::Crypto`] when hashing fails.
+    pub fn new<R: CryptoRng + ?Sized>(params: PasswordParams, rng: &mut R) -> Result<Self, Error> {
+        let params = params.to_argon2()?;
+        let mut filler = [0u8; 32];
+        rng.fill_bytes(&mut filler);
+        let dummy = hash_with(&params, &crate::hex(&filler), rng)?;
+        filler.zeroize();
+        Ok(Self { params, dummy })
+    }
+
+    /// Hashes a password with a fresh salt from `rng`, without the length policy (for
+    /// importing). Prefer [`hash_new_password`](Self::hash_new_password) for passwords users
+    /// choose.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] when Argon2 fails.
+    pub fn hash<R: CryptoRng + ?Sized>(
+        &self,
+        password: &str,
+        rng: &mut R,
+    ) -> Result<PasswordHash, Error> {
+        hash_with(&self.params, password, rng)
+    }
+
+    /// Checks [`check_policy`], then hashes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] with `password_too_short` or `password_too_long`, or
+    /// [`Error::Crypto`].
+    pub fn hash_new_password<R: CryptoRng + ?Sized>(
+        &self,
+        password: &str,
+        rng: &mut R,
+    ) -> Result<PasswordHash, Error> {
+        check_policy(password)?;
+        self.hash(password, rng)
+    }
+
+    /// Whether `password` matches `stored`.
+    ///
+    /// With `stored` = `None` (unknown account, or no password set) it still runs a full hash
+    /// against the dummy and returns `false`, so timing does not tell known accounts from
+    /// unknown ones. Passwords longer than four times [`MAX_LEN`] bytes are not hashed as
+    /// given: the dummy is checked instead and the answer is `false`.
+    #[must_use]
+    pub fn verify(&self, password: &str, stored: Option<&PasswordHash>) -> bool {
+        let argon2 = argon2(self.params.clone());
+        let too_long = password.len() > MAX_LEN * 4;
+        let (candidate, real) = match stored {
+            Some(stored) if !too_long => (stored, true),
+            _ => (&self.dummy, false),
+        };
+        let password = if too_long { "" } else { password };
+        let matched = argon2
+            .verify_password(password.as_bytes(), candidate.as_str())
+            .is_ok();
+        matched && real
+    }
+}
+
+fn argon2(params: Params) -> Argon2<'static> {
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+fn hash_with<R: CryptoRng + ?Sized>(
+    params: &Params,
+    password: &str,
+    rng: &mut R,
+) -> Result<PasswordHash, Error> {
+    let mut salt = [0u8; SALT_LEN];
+    rng.fill_bytes(&mut salt);
+    argon2(params.clone())
+        .hash_password_with_salt(password.as_bytes(), &salt)
+        .map(|hash| PasswordHash(hash.to_string()))
+        .map_err(|_| Error::Crypto("argon2 hashing failed"))
+}
+
+/// The length policy for new passwords: [`MIN_LEN`] to [`MAX_LEN`] characters.
+///
+/// # Errors
+///
+/// [`Error::InvalidRequest`] with `password_too_short` or `password_too_long`.
+///
+/// ```
+/// use latchkey::password::check_policy;
+/// assert!(check_policy("short").is_err());
+/// assert!(check_policy("twelve chars").is_ok());
+/// ```
+pub fn check_policy(password: &str) -> Result<(), Error> {
     let len = password.chars().count();
     if len < MIN_LEN {
         return Err(Error::InvalidRequest("password_too_short"));
@@ -86,11 +260,10 @@ pub(crate) fn check_policy(password: &str) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    fn cheap() -> PasswordParams {
+    pub(crate) fn cheap() -> PasswordParams {
         PasswordParams {
             memory_kib: 64,
             iterations: 1,
@@ -98,38 +271,70 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn hashes_verify_and_reject() {
-        let hasher = Hasher::new(cheap()).await.unwrap();
-        let hash = hasher.hash("correct horse battery".into()).await.unwrap();
-        assert!(hash.starts_with("$argon2id$"));
-        assert!(
-            hasher
-                .verify("correct horse battery", Some(&hash))
-                .await
-                .unwrap()
-        );
-        assert!(
-            !hasher
-                .verify("wrong horse battery", Some(&hash))
-                .await
-                .unwrap()
-        );
+    #[test]
+    fn hashes_verify_and_reject() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let hash = hasher.hash("correct horse battery", &mut rng)?;
+        assert!(hash.as_str().starts_with("$argon2id$v=19$m=64,t=1,p=1$"));
+        assert!(hasher.verify("correct horse battery", Some(&hash)));
+        assert!(!hasher.verify("wrong horse battery", Some(&hash)));
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn missing_hash_never_verifies() {
-        let hasher = Hasher::new(cheap()).await.unwrap();
-        assert!(!hasher.verify("anything at all", None).await.unwrap());
+    #[test]
+    fn missing_hash_never_verifies() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        assert!(!hasher.verify("anything at all", None));
+        assert!(!hasher.verify("", None));
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_passwords_never_verify() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let long = "x".repeat(MAX_LEN * 4 + 1);
+        let hash = hasher.hash(&long, &mut rng)?;
+        assert!(!hasher.verify(&long, Some(&hash)));
+        Ok(())
+    }
+
+    #[test]
+    fn salts_differ_per_hash() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let a = hasher.hash("correct horse battery", &mut rng)?;
+        let b = hasher.hash("correct horse battery", &mut rng)?;
+        assert_ne!(a, b);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_hashes_parse_and_garbage_does_not() -> Result<(), Error> {
+        let mut rng = crate::test_rng();
+        let hasher = PasswordHasher::new(cheap(), &mut rng)?;
+        let hash = hasher.hash("correct horse battery", &mut rng)?;
+        let reloaded = PasswordHash::try_from(hash.as_str())?;
+        assert!(hasher.verify("correct horse battery", Some(&reloaded)));
+        assert!(PasswordHash::try_from("not a hash").is_err());
+        assert!(!format!("{hash:?}").contains("argon2id"));
+        Ok(())
     }
 
     #[test]
     fn default_params_match_policy() {
         let params = PasswordParams::default();
         assert_eq!(
-            (params.memory_kib, params.iterations, params.parallelism),
+            (
+                params.memory_kib(),
+                params.iterations(),
+                params.parallelism()
+            ),
             (65536, 3, 2)
         );
+        assert!(PasswordParams::new(0, 0, 0).is_err());
     }
 
     #[test]

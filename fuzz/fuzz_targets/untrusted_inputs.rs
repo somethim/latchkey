@@ -3,5 +3,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    latchkey::fuzzing::json_bodies(data);
+    latchkey::fuzzing::untrusted_inputs(data);
 });

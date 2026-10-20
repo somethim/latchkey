@@ -1,47 +1,61 @@
-use axum::Json;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+//! The error type shared by every module.
 
-use crate::store::StoreError;
-
-/// Errors carry a stable machine code for clients; details stay in the server log.
-#[derive(Debug, thiserror::Error)]
+/// Why latchkey refused a request or could not compute a value.
+///
+/// Refusals carry a stable machine [`code`](Error::code) for clients and a suggested
+/// [`http_status`](Error::http_status); details stay out of what the client sees.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
+    /// No session, or the session is unknown, expired, at the wrong stage or for an inactive
+    /// account.
     #[error("not signed in")]
     Unauthorized,
+    /// A password, code, link or passkey was rejected. Deliberately says no more than that.
     #[error("sign-in failed")]
     SignInFailed,
+    /// The action needs a sign-in or step-up within the step-up window.
     #[error("a recent sign-in is required")]
     StepUpRequired,
+    /// Signed in, but not allowed to do this.
     #[error("not allowed")]
     Forbidden,
+    /// An unsafe request failed the Origin, `Sec-Fetch-Site` or CSRF token check.
     #[error("request rejected by the origin or CSRF check")]
     CsrfRejected,
+    /// The thing to act on does not exist.
     #[error("not found")]
     NotFound,
+    /// The input is malformed; the detail is a short machine-readable reason.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    /// The request conflicts with the current state, such as removing the last factor.
     #[error("conflict: {0}")]
     Conflict(&'static str),
-    #[error("too many attempts")]
-    TooManyAttempts { retry_after_secs: u64 },
-    #[error("storage: {0}")]
-    Store(#[from] StoreError),
+    /// A rate limit, the wrong-password throttle or a lockout applies.
+    #[error("too many attempts, retry after {retry_after_secs} s")]
+    TooManyAttempts {
+        /// Seconds until the next attempt can succeed; at least 1.
+        retry_after_secs: u64,
+    },
+    /// A configuration value is unusable.
     #[error("configuration: {0}")]
     Config(&'static str),
-    #[error("internal: {0}")]
-    Internal(String),
-}
-
-#[derive(Serialize)]
-struct Body {
-    error: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<&'static str>,
+    /// A cryptographic operation failed, such as sealing or hashing.
+    #[error("cryptography: {0}")]
+    Crypto(&'static str),
+    /// The operating system did not provide randomness.
+    #[error("the operating system random number generator failed")]
+    Rng,
 }
 
 impl Error {
+    /// A short, stable code to show to clients, such as `sign_in_failed`.
+    ///
+    /// ```
+    /// assert_eq!(latchkey::Error::StepUpRequired.code(), "step_up_required");
+    /// ```
+    #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Error::Unauthorized => "unauthorized",
@@ -53,54 +67,69 @@ impl Error {
             Error::InvalidRequest(_) => "invalid_request",
             Error::Conflict(_) => "conflict",
             Error::TooManyAttempts { .. } => "too_many_attempts",
-            Error::Store(_) | Error::Config(_) | Error::Internal(_) => "internal",
+            Error::Config(_) | Error::Crypto(_) | Error::Rng => "internal",
         }
     }
 
-    pub fn status(&self) -> StatusCode {
+    /// The HTTP status code latchkey 0.2 answered with for this error.
+    ///
+    /// ```
+    /// assert_eq!(latchkey::Error::SignInFailed.http_status(), 401);
+    /// ```
+    #[must_use]
+    pub fn http_status(&self) -> u16 {
         match self {
-            Error::Unauthorized | Error::SignInFailed | Error::StepUpRequired => {
-                StatusCode::UNAUTHORIZED
-            }
-            Error::Forbidden | Error::CsrfRejected => StatusCode::FORBIDDEN,
-            Error::NotFound => StatusCode::NOT_FOUND,
-            Error::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            Error::Conflict(_) => StatusCode::CONFLICT,
-            Error::TooManyAttempts { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Error::Store(_) | Error::Config(_) | Error::Internal(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Error::Unauthorized | Error::SignInFailed | Error::StepUpRequired => 401,
+            Error::Forbidden | Error::CsrfRejected => 403,
+            Error::NotFound => 404,
+            Error::InvalidRequest(_) => 400,
+            Error::Conflict(_) => 409,
+            Error::TooManyAttempts { .. } => 429,
+            Error::Config(_) | Error::Crypto(_) | Error::Rng => 500,
         }
     }
 
-    pub(crate) fn internal(err: impl std::fmt::Display) -> Self {
-        Error::Internal(err.to_string())
+    /// The detail to show next to the code, for [`Error::InvalidRequest`] and
+    /// [`Error::Conflict`].
+    #[must_use]
+    pub fn detail(&self) -> Option<&'static str> {
+        match self {
+            Error::InvalidRequest(detail) | Error::Conflict(detail) => Some(detail),
+            _ => None,
+        }
+    }
+
+    /// Seconds to send as `Retry-After`, for [`Error::TooManyAttempts`].
+    #[must_use]
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Error::TooManyAttempts { retry_after_secs } => Some(*retry_after_secs),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn too_many(retry_after_secs: u64) -> Self {
+        Error::TooManyAttempts {
+            retry_after_secs: retry_after_secs.max(1),
+        }
     }
 }
 
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        let status = self.status();
-        if status.is_server_error() {
-            tracing::error!(error = %self, "latchkey request failed");
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn server_side_failures_share_one_code() {
+        for error in [Error::Config("x"), Error::Crypto("y"), Error::Rng] {
+            assert_eq!(error.code(), "internal");
+            assert_eq!(error.http_status(), 500);
         }
-        let detail = match &self {
-            Error::InvalidRequest(detail) | Error::Conflict(detail) => Some(*detail),
-            _ => None,
-        };
-        let mut response = (
-            status,
-            Json(Body {
-                error: self.code(),
-                detail,
-            }),
-        )
-            .into_response();
-        if let Error::TooManyAttempts { retry_after_secs } = self
-            && let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string())
-        {
-            response.headers_mut().insert(header::RETRY_AFTER, value);
-        }
-        response
+    }
+
+    #[test]
+    fn retry_after_is_at_least_one_second() {
+        assert_eq!(Error::too_many(0).retry_after_secs(), Some(1));
+        assert_eq!(Error::too_many(7).retry_after_secs(), Some(7));
     }
 }
