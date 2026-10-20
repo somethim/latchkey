@@ -139,6 +139,62 @@ println!("encrypted {encrypted} values");
 Values that are already encrypted are skipped, so running it again does nothing. The store
 migration adds a `latchkey_devices` table; every browser counts as new once after the upgrade.
 
+## Sessions started by your app
+
+Sometimes the app completes a sign-in itself, for example a desktop app that opens the
+browser, where the user is already signed in, and receives a one-time code back on a loopback
+redirect. `Latchkey::issue_session` then starts a latchkey session for that account, exactly
+like a normal sign-in: a fresh token stored as SHA-256, `session_ttl`, the client IP as an
+HMAC, `authenticated_at` set to now (the step-up window starts), failed attempts cleared, a
+`sign_in` audit event with your method, and the new-device check and mail.
+
+**It checks no factor.** Only call it for a user that latchkey has just verified, such as the
+account of the browser session the hand-off started from. Never pass it a user id that a
+client chose. It refuses accounts that have not finished setup (`forbidden`) and accounts
+that are locked out (`too_many_attempts`), and `method` must be 1 to 32 characters from
+`a-z`, `0-9` and `_`, and not one of latchkey's own (`setup`, `password`, `passkey`,
+`email_link`, `totp`, `recovery_code`).
+
+```rust,no_run
+# use axum::http::HeaderMap;
+# use latchkey::{Error, IssueSession, Latchkey};
+# use uuid::Uuid;
+// In the browser, before handing off: who is signed in? (Check the origin and the CSRF token
+// with `CurrentUser::csrf_matches` yourself if this is an unsafe request.)
+async fn browser_user(auth: &Latchkey, headers: &HeaderMap) -> Result<Uuid, Error> {
+    Ok(auth.current_user_from_headers(headers).await?.id())
+}
+
+// Later, when the desktop app redeems the one-time code that carried that user id:
+async fn desktop_session(
+    auth: &Latchkey,
+    user: Uuid,
+    headers: &HeaderMap,
+    peer: std::net::IpAddr,
+) -> Result<(), Error> {
+    let request = IssueSession::from_headers(auth, "desktop_bridge", headers, Some(peer));
+    let issued = auth.issue_session(user, request).await?;
+    let [session_cookie, device_cookie] = issued.set_cookie_headers()?;
+    // Send both as `Set-Cookie` with `issued.csrf_token()` in the body, or hand
+    // `issued.session_cookie().value()` to the app's keyring.
+    # let _ = (session_cookie, device_cookie);
+    Ok(())
+}
+```
+
+- `IssueSession { method, client_ip, user_agent, device_cookie }` has public fields;
+  `IssueSession::new(method)` leaves the rest empty and `IssueSession::from_headers` reads them
+  the way the endpoints do (socket address or, with `trust_forwarded_for`, `X-Forwarded-For`;
+  `User-Agent`; the device cookie).
+- `IssuedSession` has the `user_id`, `session_id`, `csrf_token`, `authenticated_at`,
+  `expires_at` and two `IssuedCookie`s, `session_cookie` and `device_cookie`, each with
+  `name`, `value`, `max_age` and `set_cookie()` (`name=value; Path=/; Max-Age=…; HttpOnly;
+  Secure; SameSite=Lax`). Its `Debug` output leaves out the secrets.
+- `Latchkey::session_from_cookie(value)` and `Latchkey::current_user_from_headers(headers)`
+  return the `CurrentUser` of a completed, unexpired session, or `unauthorized`. Unlike the
+  extractor they check no origin or CSRF token; `CurrentUser::csrf_token` and
+  `CurrentUser::csrf_matches` are there for that.
+
 ## Endpoints
 
 All bodies are JSON. Responses that start a session set the cookie and include `stage` and

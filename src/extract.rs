@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::Json;
 use axum::extract::{ConnectInfo, FromRef, FromRequest, FromRequestParts, Request};
@@ -62,7 +62,7 @@ pub(crate) fn set_device_cookie(latchkey: &Latchkey, token: &str) -> Option<Head
     )
 }
 
-fn cookie_header(name: &str, token: &str, max_age_secs: i64) -> Option<HeaderValue> {
+pub(crate) fn cookie_header(name: &str, token: &str, max_age_secs: i64) -> Option<HeaderValue> {
     HeaderValue::from_str(&format!(
         "{name}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly; Secure; SameSite=Lax"
     ))
@@ -70,12 +70,23 @@ fn cookie_header(name: &str, token: &str, max_age_secs: i64) -> Option<HeaderVal
 }
 
 pub(crate) fn client_from(latchkey: &Latchkey, parts: &Parts) -> Client {
+    let socket = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    client_from_headers(latchkey, &parts.headers, socket)
+}
+
+pub(crate) fn client_from_headers(
+    latchkey: &Latchkey,
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+) -> Client {
     let forwarded = latchkey
         .config()
         .trust_forwarded_for
         .then(|| {
-            parts
-                .headers
+            headers
                 .get_all("x-forwarded-for")
                 .iter()
                 .filter_map(|value| value.to_str().ok())
@@ -85,20 +96,19 @@ pub(crate) fn client_from(latchkey: &Latchkey, parts: &Parts) -> Client {
                 .map(str::to_owned)
         })
         .flatten();
-    let socket = parts
-        .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string());
-    let user_agent = parts
-        .headers
+    let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
-        .map(|ua| ua.chars().take(MAX_USER_AGENT).collect());
+        .map(truncate_user_agent);
     Client {
-        ip: forwarded.or(socket),
+        ip: forwarded.or_else(|| peer.map(|ip| ip.to_string())),
         user_agent,
-        device: session_cookie(&parts.headers, &latchkey.config().device_cookie_name),
+        device: session_cookie(headers, &latchkey.config().device_cookie_name),
     }
+}
+
+pub(crate) fn truncate_user_agent(raw: &str) -> String {
+    raw.chars().take(MAX_USER_AGENT).collect()
 }
 
 impl<S> FromRequestParts<S> for Client
@@ -132,7 +142,28 @@ impl AnySession {
 async fn load_session(latchkey: &Latchkey, parts: &Parts) -> Result<AnySession, Error> {
     let token = session_cookie(&parts.headers, &latchkey.config().cookie_name)
         .ok_or(Error::Unauthorized)?;
-    let hash = token_hash(&token).ok_or(Error::Unauthorized)?;
+    let found = session_by_token(latchkey, &token).await?;
+    if is_unsafe(&parts.method) {
+        let presented = parts
+            .headers
+            .get(CSRF_HEADER)
+            .map(HeaderValue::as_bytes)
+            .unwrap_or_default();
+        if !origin_ok(latchkey, &parts.headers)
+            || !ct_eq(presented, found.session.csrf_token.as_bytes())
+        {
+            return Err(Error::CsrfRejected);
+        }
+    }
+    Ok(found)
+}
+
+/// The session a cookie value names, at any stage; no CSRF or origin check.
+pub(crate) async fn session_by_token(
+    latchkey: &Latchkey,
+    token: &str,
+) -> Result<AnySession, Error> {
+    let hash = token_hash(token).ok_or(Error::Unauthorized)?;
     let store = latchkey.store();
     let session = store
         .session_by_hash(&hash)
@@ -148,17 +179,6 @@ async fn load_session(latchkey: &Latchkey, parts: &Parts) -> Result<AnySession, 
         .ok_or(Error::Unauthorized)?;
     if session.stage != Stage::Setup && !user.active {
         return Err(Error::Unauthorized);
-    }
-    if is_unsafe(&parts.method) {
-        let presented = parts
-            .headers
-            .get(CSRF_HEADER)
-            .map(HeaderValue::as_bytes)
-            .unwrap_or_default();
-        if !origin_ok(latchkey, &parts.headers) || !ct_eq(presented, session.csrf_token.as_bytes())
-        {
-            return Err(Error::CsrfRejected);
-        }
     }
     Ok(AnySession { session, user })
 }
@@ -210,6 +230,16 @@ impl CurrentUser {
 
     pub fn authenticated_at(&self) -> Option<OffsetDateTime> {
         self.session.authenticated_at
+    }
+
+    /// The session's CSRF token, for a server-rendered form that posts back to the app.
+    pub fn csrf_token(&self) -> &str {
+        &self.session.csrf_token
+    }
+
+    /// Compares `presented` with the session's CSRF token in constant time.
+    pub fn csrf_matches(&self, presented: &str) -> bool {
+        ct_eq(presented.as_bytes(), self.session.csrf_token.as_bytes())
     }
 }
 

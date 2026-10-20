@@ -27,6 +27,14 @@ All notable changes to this crate are documented here. The format follows
 - Property tests (`proptest`) for token and cookie parsing, the rate limiter, the
   wrong-password window, encryption and request bodies, and a cargo-fuzz target
   `json_bodies` in `fuzz/` behind the internal `fuzzing` feature.
+- `Latchkey::issue_session(user_id, IssueSession)` starts a full session for a sign-in the app
+  completed itself (such as a desktop hand-off from a signed-in browser), with the same token
+  format, storage, IP HMAC, step-up window, `sign_in` audit event and new-device mail as a
+  normal sign-in. It refuses locked accounts and accounts that have not finished setup, and
+  methods that are latchkey's own. It returns an `IssuedSession` with the CSRF token and both
+  cookies as `IssuedCookie` values with ready `Set-Cookie` headers.
+- `Latchkey::session_from_cookie` and `Latchkey::current_user_from_headers` to verify a session
+  outside the extractors, and `CurrentUser::csrf_token` and `CurrentUser::csrf_matches`.
 
 ### Changed
 
