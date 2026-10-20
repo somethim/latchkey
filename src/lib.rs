@@ -112,7 +112,7 @@ pub mod session;
 pub mod token;
 pub mod totp;
 
-pub use account::{Account, Email, Factors, Lockout, LockoutPolicy, Role};
+pub use account::{Account, Email, Factors, Lockout, LockoutPolicy, PasswordOnly, Role};
 pub use config::{Config, ConfigBuilder};
 pub use error::Error;
 pub use flow::step_up::StepUpFailures;

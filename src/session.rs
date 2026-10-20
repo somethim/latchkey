@@ -66,6 +66,7 @@ impl std::str::FromStr for Stage {
 const RESERVED_METHODS: &[&str] = &[
     "setup",
     "password",
+    "password_only",
     "passkey",
     "email_link",
     "totp",
@@ -75,8 +76,8 @@ const RESERVED_METHODS: &[&str] = &[
 
 /// A sign-in method the app names for sessions it completes itself (see
 /// [`issue_session`](crate::flow::issue_session)): 1 to 32 characters from `a-z`, `0-9` and
-/// `_`, and none of latchkey's own (`setup`, `password`, `passkey`, `email_link`, `totp`,
-/// `recovery_code`, `step_up`).
+/// `_`, and none of latchkey's own (`setup`, `password`, `password_only`, `passkey`,
+/// `email_link`, `totp`, `recovery_code`, `step_up`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppMethod(String);
 
@@ -128,6 +129,10 @@ pub enum SignInMethod {
     PasswordRecoveryCode,
     /// `password+passkey`.
     PasswordPasskey,
+    /// A password alone, for an account without a second factor under
+    /// [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled)
+    /// (`password_only`).
+    PasswordOnly,
     /// A discoverable passkey on its own (`passkey`).
     Passkey,
     /// An emailed sign-in link (`email_link`).
@@ -148,6 +153,7 @@ impl SignInMethod {
             SignInMethod::PasswordTotp => "password+totp",
             SignInMethod::PasswordRecoveryCode => "password+recovery_code",
             SignInMethod::PasswordPasskey => "password+passkey",
+            SignInMethod::PasswordOnly => "password_only",
             SignInMethod::Passkey => "passkey",
             SignInMethod::EmailLink => "email_link",
             SignInMethod::StepUp => "step_up",
@@ -166,6 +172,7 @@ impl std::str::FromStr for SignInMethod {
             "password+totp" => SignInMethod::PasswordTotp,
             "password+recovery_code" => SignInMethod::PasswordRecoveryCode,
             "password+passkey" => SignInMethod::PasswordPasskey,
+            "password_only" => SignInMethod::PasswordOnly,
             "passkey" => SignInMethod::Passkey,
             "email_link" => SignInMethod::EmailLink,
             "step_up" => SignInMethod::StepUp,
@@ -417,6 +424,7 @@ mod tests {
             "desktop-bridge",
             "password+totp",
             "setup",
+            "password_only",
             "passkey",
             "email_link",
             "step_up",
@@ -452,6 +460,7 @@ mod tests {
             "password+totp",
             "password+recovery_code",
             "password+passkey",
+            "password_only",
             "passkey",
             "email_link",
             "step_up",

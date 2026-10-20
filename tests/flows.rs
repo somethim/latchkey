@@ -19,7 +19,7 @@ use latchkey::flow::{self, LinkKind};
 use latchkey::limits::RateLimits;
 use latchkey::mail::MailKind;
 use latchkey::session::{Access, AppMethod, SignInMethod, Stage};
-use latchkey::{Error, Lockout, LockoutPolicy, StepUpFailures};
+use latchkey::{Error, Lockout, LockoutPolicy, PasswordOnly, StepUpFailures};
 use time::Duration;
 
 fn signed_in_method(state: &SignIn) -> Option<SignInMethod> {
@@ -1150,4 +1150,131 @@ fn recovery_codes_can_be_regenerated() {
         Some(Error::SignInFailed)
     );
     assert!(app.code_step(&mut laptop, &code_of(&new, 0)).is_ok());
+}
+
+// ---- password-only accounts ----
+
+fn password_only() -> App {
+    App::with_config(
+        latchkey::Config::builder(OWNER, common::ORIGIN)
+            .password(common::cheap())
+            .password_only(PasswordOnly::AllowedUntilEnrolled),
+    )
+}
+
+/// Setup with a password and nothing else; `Ok` when setup finished.
+fn setup_with_password_only(app: &mut App, browser: &mut Browser) -> Result<(), Error> {
+    app.request_setup(browser);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.redeem_setup(browser, LinkKind::Setup, &token).unwrap();
+    app.setup_password(browser, PASSWORD).unwrap();
+    app.finish_setup(browser).map(|_| ())
+}
+
+#[test]
+fn by_default_a_password_only_account_gets_no_session() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    assert_eq!(
+        setup_with_password_only(&mut app, &mut browser).err(),
+        Some(Error::InvalidRequest("second_factor_required"))
+    );
+    let mut owner = app.account(app.owner_id()).unwrap();
+    owner.active = true;
+    assert!(owner.factors.password && !owner.factors.has_second_factor());
+    assert_eq!(
+        flow::issue_session(
+            &app.config,
+            &owner,
+            AppMethod::new("desktop_bridge").unwrap(),
+            &latchkey::flow::Client::default(),
+            app.now,
+            &mut app.rng
+        )
+        .err(),
+        Some(Error::Forbidden)
+    );
+}
+
+#[test]
+fn a_password_only_account_signs_in_with_its_password_when_allowed() {
+    let mut app = password_only();
+    let mut browser = Browser::default();
+    setup_with_password_only(&mut app, &mut browser).unwrap();
+    assert!(app.account(app.owner_id()).unwrap().active);
+
+    let mut laptop = Browser::default();
+    let state = app.password_step(&mut laptop, OWNER, PASSWORD).unwrap();
+    assert_eq!(signed_in_method(&state), Some(SignInMethod::PasswordOnly));
+    let session = app.session_of(&laptop).unwrap();
+    assert_eq!(session.stage, Stage::Full);
+    let sign_in = app
+        .audit
+        .iter()
+        .rev()
+        .find(|event| event.kind == AuditKind::SignIn)
+        .unwrap();
+    assert_eq!(sign_in.detail.as_deref(), Some("password_only"));
+
+    assert_eq!(
+        app.password_step(&mut Browser::default(), OWNER, "wrong password!!")
+            .err(),
+        Some(Error::SignInFailed)
+    );
+    assert_eq!(app.account(app.owner_id()).unwrap().lockout.failures, 1);
+
+    let owner = app.account(app.owner_id()).unwrap();
+    let issued = flow::issue_session(
+        &app.config,
+        &owner,
+        AppMethod::new("desktop_bridge").unwrap(),
+        &latchkey::flow::Client::default(),
+        app.now,
+        &mut app.rng,
+    );
+    assert!(issued.is_ok());
+}
+
+#[test]
+fn a_password_only_account_steps_up_with_its_password() {
+    let mut app = password_only();
+    let mut browser = Browser::default();
+    setup_with_password_only(&mut app, &mut browser).unwrap();
+    app.advance(Duration::minutes(6));
+    assert_eq!(
+        app.step_up_password(&mut browser, "wrong password!!", "")
+            .err(),
+        Some(Error::SignInFailed)
+    );
+    let done = app.step_up_password(&mut browser, PASSWORD, "").unwrap();
+    assert!(matches!(done, StepUp::Done { .. }));
+    let session = app.session_of(&browser).unwrap();
+    assert!(
+        session
+            .authorize(true, Access::Recent, app.config.step_up_window(), app.now)
+            .is_ok()
+    );
+}
+
+#[test]
+fn once_a_second_factor_is_enrolled_it_is_required_again() {
+    let mut app = password_only();
+    let mut browser = Browser::default();
+    setup_with_password_only(&mut app, &mut browser).unwrap();
+    let secret = app.enrol_totp(app.owner_id());
+    app.advance(Duration::seconds(30));
+
+    let mut laptop = Browser::default();
+    let state = app.password_step(&mut laptop, OWNER, PASSWORD).unwrap();
+    assert!(matches!(state, SignIn::SecondFactor { .. }));
+    assert_eq!(app.session_of(&laptop).unwrap().stage, Stage::SecondFactor);
+    let code = secret.code_at(app.now).unwrap();
+    let state = app.code_step(&mut laptop, &code).unwrap();
+    assert_eq!(signed_in_method(&state), Some(SignInMethod::PasswordTotp));
+
+    app.advance(Duration::minutes(6));
+    assert_eq!(
+        app.step_up_password(&mut browser, PASSWORD, "").err(),
+        Some(Error::SignInFailed)
+    );
 }

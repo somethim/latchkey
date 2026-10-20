@@ -21,6 +21,15 @@ All notable changes to this crate are documented here. The format follows
 - `Error::SessionEnded` (`session_ended`, 401) for the step-up that ends its session.
 - `StepUpFailures::ends_session(n)` for apps that end the session from the count their
   increment returned.
+- `PasswordOnly` (`account`, re-exported at the root) and `ConfigBuilder::password_only` /
+  `Config::password_only`: with `PasswordOnly::AllowedUntilEnrolled`, an account with a
+  password and no second factor (imported, or not enrolled yet) finishes sign-in, step-up,
+  setup and `issue_session` with its password alone. A sign-in that way records the new
+  method `SignInMethod::PasswordOnly` (`password_only`). Once the account enrols TOTP or a
+  passkey the second factor is required again. The default, `PasswordOnly::Refused`, keeps
+  the old behaviour.
+- `Factors::has_second_factor`, `Factors::are_sufficient(policy)` and
+  `Factors::password_suffices(policy)`.
 
 ### Changed
 
@@ -28,6 +37,8 @@ All notable changes to this crate are documented here. The format follows
   struct literal must set it (0 when step-up failures count against the account).
 - `AuditKind::SessionRevoked` also records a session ended by the step-up limit, with detail
   `step_up_failures`.
+- `password_only` is reserved like latchkey's other method names: `AppMethod::new` refuses
+  it, and a stored `password_only` parses as `SignInMethod::PasswordOnly`.
 
 ## [0.3.0-dev]
 

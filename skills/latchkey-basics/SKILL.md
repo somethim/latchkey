@@ -38,6 +38,10 @@ app side right is what keeps sign-in secure.
   same transaction, `Effect::ClearStepUpFailures` as a reset, and the `DeleteSession` that
   follows at the limit; answer `Error::SessionEnded` by sending the user to sign in again.
   Pass `FailureWindow::default()` as `wrong_passwords` in that mode: it is not consulted.
+- Accounts with only a password (imported, or not enrolled yet) cannot sign in unless the
+  config sets `password_only(PasswordOnly::AllowedUntilEnrolled)`. Then a matching password
+  signs such an account in directly (`SignIn::SignedIn`, method `password_only`); enrolling
+  TOTP or a passkey makes the second factor required again. Do not fake a second factor.
 - Redeem links atomically (`DELETE ... RETURNING`), then pass the deleted `LinkToken` (or
   `None`) to the flow.
 

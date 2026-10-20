@@ -161,10 +161,48 @@ pub struct Factors {
 
 impl Factors {
     /// A password and at least one of TOTP or a passkey: what setup requires before it
-    /// completes and what [`issue_session`](crate::flow::issue_session) requires.
+    /// completes and what [`issue_session`](crate::flow::issue_session) requires, under the
+    /// default [`PasswordOnly::Refused`].
     #[must_use]
     pub const fn is_complete(&self) -> bool {
-        self.password && (self.totp || self.passkeys > 0)
+        self.password && self.has_second_factor()
+    }
+
+    /// TOTP or at least one passkey is enrolled.
+    #[must_use]
+    pub const fn has_second_factor(&self) -> bool {
+        self.totp || self.passkeys > 0
+    }
+
+    /// Whether these factors are enough to finish setup, sign in and be issued a session
+    /// under `policy`: [`is_complete`](Self::is_complete), or with
+    /// [`PasswordOnly::AllowedUntilEnrolled`] a password alone while no second factor is
+    /// enrolled.
+    ///
+    /// ```
+    /// use latchkey::{Factors, PasswordOnly};
+    ///
+    /// let password_only = Factors { password: true, totp: false, passkeys: 0 };
+    /// assert!(!password_only.are_sufficient(PasswordOnly::Refused));
+    /// assert!(password_only.are_sufficient(PasswordOnly::AllowedUntilEnrolled));
+    /// assert!(!Factors::default().are_sufficient(PasswordOnly::AllowedUntilEnrolled));
+    /// ```
+    #[must_use]
+    pub const fn are_sufficient(&self, policy: PasswordOnly) -> bool {
+        match policy {
+            PasswordOnly::Refused => self.is_complete(),
+            PasswordOnly::AllowedUntilEnrolled => self.password,
+        }
+    }
+
+    /// Whether a password alone completes a sign-in or step-up under `policy`: a password
+    /// and no second factor, with [`PasswordOnly::AllowedUntilEnrolled`]. Once a second
+    /// factor is enrolled it is always required.
+    #[must_use]
+    pub const fn password_suffices(&self, policy: PasswordOnly) -> bool {
+        matches!(policy, PasswordOnly::AllowedUntilEnrolled)
+            && self.password
+            && !self.has_second_factor()
     }
 
     /// Refuses to remove TOTP when it is not enrolled or is the only second factor.
@@ -193,6 +231,28 @@ impl Factors {
         }
         Ok(())
     }
+}
+
+/// Whether an account with a password and no second factor may sign in; set with
+/// [`ConfigBuilder::password_only`](crate::ConfigBuilder::password_only).
+///
+/// latchkey asks for a second factor after every password. That leaves accounts imported
+/// from another system with only a password, or apps that let users enrol TOTP or a passkey
+/// later, unable to sign in. [`AllowedUntilEnrolled`](PasswordOnly::AllowedUntilEnrolled)
+/// lets such an account finish sign-in (method
+/// [`SignInMethod::PasswordOnly`](crate::session::SignInMethod::PasswordOnly)), step-up,
+/// setup and [`issue_session`](crate::flow::issue_session) with its password alone, until it
+/// enrols a second factor; from then on the second factor is required as usual.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum PasswordOnly {
+    /// Every account needs a password and a second factor. latchkey 0.2's behaviour.
+    #[default]
+    Refused,
+    /// An account with a password and no second factor signs in with the password alone.
+    AllowedUntilEnrolled,
 }
 
 /// Every `threshold`-th consecutive failure locks the account, starting at `base` and

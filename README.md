@@ -108,6 +108,24 @@ count the increment returned. A successful step-up emits `ClearStepUpFailures` a
 `ClearFailures`, so a full proof lifts an account lock. A passkey that fails to verify is not
 counted in either mode.
 
+### Accounts with only a password
+
+latchkey asks for a second factor after every password, and setup does not finish without
+one. Accounts imported from another system with only a password, or apps that let users
+enrol TOTP or a passkey later, can opt in:
+
+```rust,ignore
+let config = Config::builder("owner@example.com", "https://home.example.com")
+    .password_only(PasswordOnly::AllowedUntilEnrolled)
+    .build()?;
+```
+
+Then an account with a password and no second factor signs in with the password alone
+(`SignIn::VerifyPassword` goes straight to `SignedIn`, method `password_only`), steps up with
+it, finishes setup and gets `issue_session`. As soon as the account has TOTP or a passkey,
+that factor is required again; `Factors::password_suffices(config.password_only())` says
+which case applies.
+
 ## Example: password + TOTP with your own storage
 
 A condensed version of `examples/password_totp.rs` (`cargo run --example password_totp`).

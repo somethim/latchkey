@@ -119,7 +119,10 @@ pub enum StepUpEvent {
     PasswordChecked {
         /// Whether it matched.
         matched: bool,
-        /// The TOTP or recovery code that came with it.
+        /// The TOTP or recovery code that came with it. Ignored for an account without a
+        /// second factor under
+        /// [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled),
+        /// whose password alone steps up.
         code: String,
         /// What to check the code against.
         material: CodeMaterial,
@@ -202,6 +205,12 @@ impl StepUp {
                         &client,
                         now,
                     ));
+                }
+                if account.factors.password_suffices(config.password_only()) {
+                    let effects = vec![Effect::ClearFailures {
+                        user_id: account.id,
+                    }];
+                    return Ok(stepped_up(config, &account, session, &client, now, effects));
                 }
                 let Some(matched) = check_code(&code, &material, now) else {
                     return Err(wrong_guess(

@@ -2,9 +2,15 @@
 //!
 //! ```text
 //! Start --Password--> VerifyPassword --PasswordChecked--> SecondFactor --Code----> SignedIn
-//!   |                                                                  \--Passkey-/
+//!   |                                 \                                \--Passkey-/
+//!   |                                  \--PasswordChecked (password only)-------> SignedIn
 //!   \--DiscoverablePasskey------------------------------------------------------> SignedIn
 //! ```
+//!
+//! A matching password goes straight to `SignedIn` (method
+//! [`SignInMethod::PasswordOnly`]) only for an account without a second factor under
+//! [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled); by
+//! default, and for every account with TOTP or a passkey, it starts a second-factor session.
 //!
 //! The password is checked in two steps so that the throttle and the lockout refuse
 //! *before* the expensive hash: `Password` decides whether to hash at all, the app then runs
@@ -174,6 +180,22 @@ impl SignIn {
                 if !matched {
                     effects.extend(failure(&account, "password", &client, now));
                     return Err(Refusal::with(Error::SignInFailed, effects));
+                }
+                if account.factors.password_suffices(config.password_only()) {
+                    let (session, done) = complete_sign_in(
+                        config,
+                        &account,
+                        &SignInMethod::PasswordOnly,
+                        &client,
+                        None,
+                        now,
+                        rng,
+                    );
+                    effects.extend(done);
+                    return Ok(Transition {
+                        state: SignIn::SignedIn { account, session },
+                        effects,
+                    });
                 }
                 let (session, started) = start_session(
                     config,

@@ -17,7 +17,7 @@ use time::Duration;
 use url::Url;
 
 use crate::Error;
-use crate::account::{Email, LockoutPolicy};
+use crate::account::{Email, LockoutPolicy, PasswordOnly};
 use crate::flow::step_up::StepUpFailures;
 use crate::http::CookieName;
 use crate::limits::RateLimits;
@@ -43,6 +43,7 @@ pub struct Config {
     durations: Durations,
     lockout: LockoutPolicy,
     step_up_failures: StepUpFailures,
+    password_only: PasswordOnly,
     rate_limits: RateLimits,
     password: PasswordParams,
 }
@@ -92,6 +93,7 @@ pub struct ConfigBuilder {
     durations: Durations,
     lockout: LockoutPolicy,
     step_up_failures: StepUpFailures,
+    password_only: PasswordOnly,
     rate_limits: RateLimits,
     password: PasswordParams,
 }
@@ -209,6 +211,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// Whether accounts with a password and no second factor may sign in. Default
+    /// [`PasswordOnly::Refused`], as in latchkey 0.2.
+    pub fn password_only(mut self, policy: PasswordOnly) -> Self {
+        self.password_only = policy;
+        self
+    }
+
     /// The rate limits and wrong-password throttle.
     pub fn rate_limits(mut self, rate_limits: RateLimits) -> Self {
         self.rate_limits = rate_limits;
@@ -277,6 +286,7 @@ impl ConfigBuilder {
             durations: self.durations,
             lockout: self.lockout,
             step_up_failures: self.step_up_failures,
+            password_only: self.password_only,
             rate_limits: self.rate_limits,
             password: self.password,
         })
@@ -302,6 +312,7 @@ impl Config {
             durations: Durations::default(),
             lockout: LockoutPolicy::default(),
             step_up_failures: StepUpFailures::default(),
+            password_only: PasswordOnly::default(),
             rate_limits: RateLimits::default(),
             password: PasswordParams::default(),
         }
@@ -391,6 +402,12 @@ impl Config {
         self.step_up_failures
     }
 
+    /// Whether accounts with a password and no second factor may sign in.
+    #[must_use]
+    pub fn password_only(&self) -> PasswordOnly {
+        self.password_only
+    }
+
     /// The rate limits.
     #[must_use]
     pub fn rate_limits(&self) -> &RateLimits {
@@ -426,6 +443,7 @@ mod tests {
         assert_eq!(config.owner_name(), "o@example.com");
         assert_eq!(config.rp_name(), "home.example.com");
         assert_eq!(config.step_up_failures(), StepUpFailures::AccountLockout);
+        assert_eq!(config.password_only(), PasswordOnly::Refused);
         Ok(())
     }
 

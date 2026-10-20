@@ -5,7 +5,8 @@
 //! Start --Redeem-------> InSetup --PasswordSet--> InSetup --Finish--> Complete
 //! ```
 //!
-//! Between `PasswordSet` and `Finish` the account enrols TOTP or a passkey with the
+//! Between `PasswordSet` and `Finish` the account enrols TOTP or a passkey (optional under
+//! [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled)) with the
 //! primitives ([`crate::totp`], and `passkey` with the `passkeys` feature), allowed by
 //! [`crate::session::Access::Enrolling`]. Rebuild `InSetup` on each
 //! request with [`Setup::resume`] from the stored setup session and the account as it is now.
@@ -105,8 +106,10 @@ impl Setup {
     ///
     /// A [`Refusal`]: [`Error::SignInFailed`] for a bad link or an account already set up;
     /// [`Error::Unauthorized`] for an expired setup session; [`Error::InvalidRequest`] with
-    /// `password_required` or `second_factor_required` when finishing too early, or for an
-    /// event the state does not take.
+    /// `password_required` or `second_factor_required` when finishing too early (a second
+    /// factor is not required under
+    /// [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled)), or
+    /// for an event the state does not take.
     #[allow(clippy::too_many_lines)] // one arm per (state, event) pair
     pub fn advance<R: CryptoRng + ?Sized>(
         self,
@@ -205,7 +208,7 @@ impl Setup {
                 if !account.factors.password {
                     return Err(Error::InvalidRequest("password_required").into());
                 }
-                if !account.factors.is_complete() {
+                if !account.factors.are_sufficient(config.password_only()) {
                     return Err(Error::InvalidRequest("second_factor_required").into());
                 }
                 let issued = recovery::generate(rng);

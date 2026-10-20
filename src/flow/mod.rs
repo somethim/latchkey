@@ -576,8 +576,9 @@ fn use_code(
 ///
 /// # Errors
 ///
-/// [`Error::Forbidden`] for an inactive account or one without a password and a second
-/// factor; [`Error::TooManyAttempts`] while it is locked.
+/// [`Error::Forbidden`] for an inactive account or one whose factors are not
+/// [sufficient](crate::Factors::are_sufficient) under [`Config::password_only`] (by default
+/// a password and a second factor); [`Error::TooManyAttempts`] while it is locked.
 pub fn issue_session<R: CryptoRng + ?Sized>(
     config: &Config,
     account: &Account,
@@ -586,7 +587,7 @@ pub fn issue_session<R: CryptoRng + ?Sized>(
     now: OffsetDateTime,
     rng: &mut R,
 ) -> Result<Transition<Session>, Error> {
-    if !account.active || !account.factors.is_complete() {
+    if !account.active || !account.factors.are_sufficient(config.password_only()) {
         return Err(Error::Forbidden);
     }
     account.lockout.check(now)?;
