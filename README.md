@@ -391,8 +391,8 @@ the other two common paths.
 
 ## Migrating from 0.3.0-dev
 
-Apps on latchkey 0.3.0-dev (from crates.io or git, such as Home and the portfolio) change these
-lines; the compiler finds each one.
+Apps on latchkey 0.3.0-dev (from crates.io or git, such as Home and the portfolio) change
+these lines; the compiler finds each one.
 
 | 0.3.0-dev | 0.3.0 |
 |---|---|

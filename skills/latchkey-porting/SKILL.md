@@ -69,8 +69,8 @@ foreign session with a latchkey one on first use.
 
 ## From a 0.3.0-dev build
 
-Apps already on 0.3.0-dev (crates.io or git) follow the "Migrating from 0.3.0-dev" table in the
-README: constructors instead of struct literals, typed error reasons, `PasskeyOnly`,
+Apps already on 0.3.0-dev (crates.io or git) follow the "Migrating from 0.3.0-dev" table
+in the README: constructors instead of struct literals, typed error reasons, `PasskeyOnly`,
 `password_params`, `&str` URLs, `Started`/`SignInStarted` from passkey starts,
 `RegistrationRequest`, `into_state(session, user, now)`, and `TotpSecret::from_bytes(..)?`.
 
