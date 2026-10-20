@@ -208,7 +208,7 @@ impl PasswordHasher {
     /// [`hash_new_password`](Self::hash_new_password), whose length policy an older password
     /// may not meet) and store the new hash in place of the old one. Hashes imported from
     /// another system with weaker parameters, or made before
-    /// [`ConfigBuilder::password`](crate::ConfigBuilder::password) was raised, are upgraded
+    /// [`ConfigBuilder::password_params`](crate::ConfigBuilder::password_params) was raised, are upgraded
     /// as their users sign in.
     ///
     /// ```

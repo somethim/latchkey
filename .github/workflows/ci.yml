@@ -59,8 +59,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Doctests and examples use `os_rng` (default feature), so the powerset covers the
       # library, unit tests and integration tests.
-      - run: cargo hack check --feature-powerset --exclude-features fuzzing --no-dev-deps
-      - run: cargo hack test --each-feature --exclude-features fuzzing --lib --tests
+      - run: cargo hack check --feature-powerset --exclude-features _fuzzing --no-dev-deps
+      - run: cargo hack test --each-feature --exclude-features _fuzzing --lib --tests
 
   docs:
     runs-on: ubuntu-latest

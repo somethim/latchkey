@@ -103,10 +103,10 @@ impl Store {
 #[allow(clippy::too_many_lines)] // the two requests read best top to bottom
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::builder("owner@example.com", "https://home.example.com")
-        .password(PasswordParams::new(19 * 1024, 2, 1)?)
+        .password_params(PasswordParams::new(19 * 1024, 2, 1)?)
         .build()?;
     let mut rng = latchkey::os_rng()?;
-    let hasher = PasswordHasher::new(config.password(), &mut rng)?;
+    let hasher = PasswordHasher::new(config.password_params(), &mut rng)?;
     let data_key = DataKey::new(&[7; 32]); // load from your secret store
     let mut throttle = WrongPasswordThrottle::new(config.rate_limits());
     let mut per_ip = RateLimiter::per_minute(config.rate_limits().per_ip_per_minute);

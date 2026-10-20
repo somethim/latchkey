@@ -4,7 +4,7 @@
 //! Start --Password--> VerifyPassword --PasswordChecked--> SecondFactor --Code----> SignedIn
 //!   |                                 \                                \--Passkey-/
 //!   |                                  \--PasswordChecked (password only)-------> SignedIn
-//!   \--DiscoverablePasskey------------------------------------------------------> SignedIn
+//!   \--PasskeyOnly------------------------------------------------------> SignedIn
 //! ```
 //!
 //! A matching password goes straight to `SignedIn` (method
@@ -105,7 +105,7 @@ pub enum SignInEvent {
     /// A passkey sign-in with no password: a discoverable assertion (the account is the one
     /// its user handle names) or an allow-list one started for an account before any session
     /// existed. From [`SignIn::Start`].
-    DiscoverablePasskey {
+    PasskeyOnly {
         /// The account, if the handle names one.
         account: Option<Account>,
         /// Whether the assertion verified against that account's passkeys, through a
@@ -272,7 +272,7 @@ impl SignIn {
             }
             (
                 SignIn::Start,
-                SignInEvent::DiscoverablePasskey {
+                SignInEvent::PasskeyOnly {
                     account,
                     verified,
                     client,

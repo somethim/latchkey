@@ -297,7 +297,7 @@ impl RelyingParty {
     /// [`Ceremony::into_browser_state`], then
     /// [`finish_authentication`](Self::finish_authentication) against the passkeys of
     /// [`Binding::user`], and report the result as
-    /// [`SignInEvent::DiscoverablePasskey`](crate::flow::sign_in::SignInEvent::DiscoverablePasskey).
+    /// [`SignInEvent::PasskeyOnly`](crate::flow::sign_in::SignInEvent::PasskeyOnly).
     ///
     /// Answering differently for addresses without passkeys tells a visitor which addresses
     /// have them; prefer [`start_discoverable`](Self::start_discoverable) where browsers

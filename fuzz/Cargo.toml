@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-latchkey = { path = "..", features = ["fuzzing"] }
+latchkey = { path = "..", features = ["_fuzzing"] }
 
 [[bin]]
 name = "untrusted_inputs"

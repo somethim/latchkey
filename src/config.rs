@@ -267,7 +267,7 @@ impl ConfigBuilder {
     }
 
     /// Argon2id parameters. Default 64 MiB, t=3, p=2.
-    pub fn password(mut self, params: PasswordParams) -> Self {
+    pub fn password_params(mut self, params: PasswordParams) -> Self {
         self.password = params;
         self
     }
@@ -488,7 +488,7 @@ impl Config {
 
     /// The Argon2id parameters.
     #[must_use]
-    pub fn password(&self) -> PasswordParams {
+    pub fn password_params(&self) -> PasswordParams {
         self.password
     }
 }

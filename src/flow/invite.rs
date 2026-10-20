@@ -124,7 +124,7 @@ impl Invite {
 /// # Errors
 ///
 /// [`Error::InvalidRequest`] with `name_too_long` beyond [`MAX_NAME_LEN`] characters.
-pub fn optional_name(raw: Option<String>) -> Result<Option<String>, Error> {
+pub(crate) fn optional_name(raw: Option<String>) -> Result<Option<String>, Error> {
     match raw.map(|name| name.trim().to_owned()) {
         Some(name) if name.chars().count() > MAX_NAME_LEN => {
             Err(Error::InvalidRequest(InvalidRequestReason::NameTooLong))

@@ -58,7 +58,7 @@ verification result) and `now`, and returns either
 
 ```text
 sign_in:    Start -Password-> VerifyPassword -PasswordChecked-> SecondFactor -Code|Passkey-> SignedIn
-            Start -DiscoverablePasskey-> SignedIn
+            Start -PasskeyOnly-> SignedIn
 email_link: Start -Request-> Requested            Start -Redeem-> SignedIn
 setup:      Start -RequestLink-> LinkRequested    Start -Redeem-> InSetup -PasswordSet-> InSetup -Finish-> Complete
 invite:     Start -Send-> Sent
@@ -174,7 +174,7 @@ mod passkey_sign_in {
 
     /// POST /sign-in/passkey/finish {ceremony_id, credential}: `ceremony` is the one the app
     /// removed from storage by the posted id. Then `passkey::record_use` on the passkeys of
-    /// the returned user, and `SignInEvent::DiscoverablePasskey { account, verified, client }`.
+    /// the returned user, and `SignInEvent::PasskeyOnly { account, verified, client }`.
     pub fn finish(
         config: &Config,
         rp: &RelyingParty,
@@ -248,7 +248,7 @@ struct Row {
 /// Built once at start-up.
 struct App {
     config: Config,                  // Config::builder(owner, origin).build()?
-    hasher: PasswordHasher,          // PasswordHasher::new(config.password(), &mut rng)?
+    hasher: PasswordHasher,          // PasswordHasher::new(config.password_params(), &mut rng)?
     data_key: DataKey,               // DataKey::new(&keys.data), kept out of the database
     throttle: WrongPasswordThrottle, // WrongPasswordThrottle::new(config.rate_limits())
     users: HashMap<UserId, Row>,
@@ -410,7 +410,7 @@ Endpoints to flow calls:
 |---|---|
 | `POST /setup/start`, `/setup/redeem`, `/setup/password`, `/setup/complete` | `Setup`: `RequestLink`, `Redeem { kind: Setup }`, `PasswordSet`, `Finish` |
 | `POST /invites`, `/invites/redeem` | `Invite::Send`, then `Setup` with `Redeem { kind: Invite }` |
-| `POST /sign-in/password`, `/sign-in/code`, `/sign-in/second-factor/passkey/*`, `/sign-in/passkey/*` | `SignIn`: `Password` + `PasswordChecked`, `Code`, `Passkey`, `DiscoverablePasskey` |
+| `POST /sign-in/password`, `/sign-in/code`, `/sign-in/second-factor/passkey/*`, `/sign-in/passkey/*` | `SignIn`: `Password` + `PasswordChecked`, `Code`, `Passkey`, `PasskeyOnly` |
 | `POST /sign-in/email`, `/sign-in/email/redeem` | `EmailLink`: `Request`, `Redeem` |
 | `POST /step-up/password`, `/step-up/passkey/*` | `StepUp`: `Password` + `PasswordChecked`, `Passkey` |
 | `POST /sign-out` | `flow::sign_out` |

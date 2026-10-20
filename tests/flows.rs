@@ -511,7 +511,7 @@ fn events_out_of_order_are_refused() {
 fn ten_wrong_passwords_in_fifteen_minutes_throttle_the_account() {
     let mut app = App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
-            .password(common::cheap())
+            .password_params(common::cheap())
             .lockout(LockoutPolicy {
                 threshold: 0,
                 ..LockoutPolicy::default()
@@ -556,7 +556,7 @@ fn unknown_addresses_are_throttled_the_same_way() {
 fn a_successful_sign_in_does_not_reset_the_throttle() {
     let mut app = App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
-            .password(common::cheap())
+            .password_params(common::cheap())
             .rate_limits(RateLimits {
                 wrong_passwords_per_account: 3,
                 ..RateLimits::default()
@@ -820,7 +820,7 @@ fn by_default_a_locked_account_cannot_step_up() {
 fn per_session(limit: u32) -> App {
     App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
-            .password(common::cheap())
+            .password_params(common::cheap())
             .step_up_failures(StepUpFailures::PerSession { limit }),
     )
 }
@@ -1166,7 +1166,7 @@ fn recovery_codes_can_be_regenerated() {
 fn password_only() -> App {
     App::with_config(
         latchkey::Config::builder(OWNER, common::ORIGIN)
-            .password(common::cheap())
+            .password_params(common::cheap())
             .password_only(PasswordOnly::AllowedUntilEnrolled),
     )
 }
@@ -1296,7 +1296,7 @@ fn once_a_second_factor_is_enrolled_it_is_required_again() {
 fn development_on_localhost_sets_cookies_without_secure() {
     let mut app = App::with_config(
         latchkey::Config::builder(OWNER, "http://localhost:3000")
-            .password(common::cheap())
+            .password_params(common::cheap())
             .danger_insecure_localhost_cookies(),
     );
     let mut owner = app.account(app.owner_id()).unwrap();

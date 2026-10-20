@@ -128,15 +128,15 @@ mod proptests;
 struct ReadmeDoctests;
 
 /// A `ChaCha12` generator seeded once from the operating system: a convenient
-/// [`CryptoRng`] to pass to latchkey. Keep one per thread or behind a lock, or create one
-/// per request.
+/// [`CryptoRng`] to pass to latchkey. Keep one per thread or behind a lock (store it as
+/// `Box<dyn CryptoRng + Send>` if you need to name its type), or create one per request.
 ///
 /// # Errors
 ///
 /// [`Error::Rng`] when the operating system provides no randomness.
 #[cfg(feature = "os-rng")]
 #[cfg_attr(docsrs, doc(cfg(feature = "os-rng")))]
-pub fn os_rng() -> Result<rand::rngs::StdRng, Error> {
+pub fn os_rng() -> Result<impl CryptoRng + Send + Sync + 'static, Error> {
     use rand::SeedableRng;
     rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng).map_err(|_| Error::Rng)
 }
@@ -160,7 +160,7 @@ pub(crate) fn test_rng() -> rand::rngs::StdRng {
 }
 
 /// Entry points for the cargo-fuzz target in `fuzz/`; not a public API.
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "_fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
     use time::OffsetDateTime;

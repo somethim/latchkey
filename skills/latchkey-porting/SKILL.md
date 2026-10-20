@@ -15,7 +15,7 @@ SQLite database keeps working with the app's own queries.
    `Config::builder(owner, origin).build()?`, `DataKey::new(&data_key)` and
    `IpTagKey::new(&secret_key)`; keep the keys where they were. Call
    `seal::check_keys(&secret_key, &data_key)?` at start.
-2. Create a `PasswordHasher::new(config.password(), &mut rng)?` once; run `verify` and
+2. Create a `PasswordHasher::new(config.password_params(), &mut rng)?` once; run `verify` and
    `hash_new_password` on a blocking thread behind a semaphore of one.
 3. Keep 0.2's tables (`latchkey_users`, `latchkey_sessions`, `latchkey_tokens`,
    `latchkey_totp`, `latchkey_passkeys`, `latchkey_recovery_codes`, `latchkey_devices`,

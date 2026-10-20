@@ -38,8 +38,9 @@ passkeys = ["serde", "dep:webauthn-rs", "dep:serde_json"]
 qr = ["dep:qrcodegen"]
 # `totp::qr_png`; pulls in the `image` crate.
 qr-png = ["qr", "dep:qrcodegen-image"]
-# Exposes `latchkey::fuzzing` for the cargo-fuzz target in `fuzz/`; not a public API.
-fuzzing = []
+# Exposes `latchkey::fuzzing` for the cargo-fuzz target in `fuzz/`; not a public API (the
+# leading underscore marks it private).
+_fuzzing = []
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }

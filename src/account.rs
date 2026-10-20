@@ -367,13 +367,11 @@ impl Lockout {
         }
     }
 
-    /// The state after one more failure, and the lock it starts, if any.
-    ///
-    /// Only for a single writer (such as an in-memory app). With a database, apply
-    /// [`Effect::RecordFailure`](crate::flow::Effect::RecordFailure) as an atomic increment
-    /// instead: computing from a snapshot loses failures that race.
-    #[must_use]
-    pub fn after_failure(
+    /// The state after one more failure, and the lock it starts, if any: the model the tests
+    /// check [`LockoutPolicy`] against. Apps apply
+    /// [`Effect::RecordFailure`](crate::flow::Effect::RecordFailure) as an atomic increment.
+    #[cfg(test)]
+    pub(crate) fn after_failure(
         self,
         policy: &LockoutPolicy,
         now: OffsetDateTime,

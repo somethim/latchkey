@@ -207,7 +207,7 @@ pub fn issue<R: CryptoRng + ?Sized>(rng: &mut R) -> IssuedToken {
 
 /// Compares two byte strings in constant time (for equal lengths).
 #[must_use]
-pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 

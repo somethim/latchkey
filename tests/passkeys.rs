@@ -152,7 +152,7 @@ fn setup_with_a_passkey_only_and_sign_in_with_it() {
     let step = SignIn::Start
         .advance(
             &app.config,
-            SignInEvent::DiscoverablePasskey {
+            SignInEvent::PasskeyOnly {
                 account: app.account(claimed),
                 verified: true,
                 client,
@@ -247,7 +247,7 @@ fn passkey_for_another_user_handle_is_rejected() {
     );
     let step = SignIn::Start.advance(
         &app.config,
-        SignInEvent::DiscoverablePasskey {
+        SignInEvent::PasskeyOnly {
             account: None,
             verified: false,
             client: latchkey::flow::Client::default(),
@@ -476,7 +476,7 @@ fn passkey_sign_in_with_an_allow_list_before_any_session() {
     let step = SignIn::Start
         .advance(
             &app.config,
-            SignInEvent::DiscoverablePasskey {
+            SignInEvent::PasskeyOnly {
                 account: app.account(user),
                 verified,
                 client,

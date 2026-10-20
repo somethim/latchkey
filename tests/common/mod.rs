@@ -97,13 +97,13 @@ impl Browser {
 
 impl App {
     pub fn new() -> Self {
-        Self::with_config(Config::builder(OWNER, ORIGIN).password(cheap()))
+        Self::with_config(Config::builder(OWNER, ORIGIN).password_params(cheap()))
     }
 
     pub fn with_config(builder: latchkey::ConfigBuilder) -> Self {
         let config = builder.build().unwrap();
         let mut rng = StdRng::seed_from_u64(7);
-        let hasher = PasswordHasher::new(config.password(), &mut rng).unwrap();
+        let hasher = PasswordHasher::new(config.password_params(), &mut rng).unwrap();
         let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         let mut app = Self {
             throttle: WrongPasswordThrottle::new(config.rate_limits()),
