@@ -1,6 +1,6 @@
 [package]
 name = "latchkey"
-version = "0.1.0"
+version = "0.2.0-dev"
 edition = "2024"
 rust-version = "1.88"
 description = "Sign-in for a small axum app: password with a second factor, passkeys, TOTP, email sign-in links, recovery codes and first-open owner setup"
