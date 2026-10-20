@@ -19,7 +19,7 @@ use latchkey::flow::{self, LinkKind};
 use latchkey::limits::RateLimits;
 use latchkey::mail::MailKind;
 use latchkey::session::{Access, AppMethod, SignInMethod, Stage};
-use latchkey::{Error, LockoutPolicy};
+use latchkey::{Error, Lockout, LockoutPolicy, StepUpFailures};
 use time::Duration;
 
 fn signed_in_method(state: &SignIn) -> Option<SignInMethod> {
@@ -787,6 +787,187 @@ fn wrong_step_up_passwords_count_towards_throttle_and_lockout() {
         Some(Error::SignInFailed)
     );
     assert_eq!(app.account(app.owner_id()).unwrap().lockout.failures, 2);
+}
+
+#[test]
+fn by_default_a_locked_account_cannot_step_up() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    let (secret, _) = app.setup_owner(&mut browser);
+    for _ in 0..5 {
+        let _ = app.password_step(&mut Browser::default(), OWNER, "wrong password!!");
+    }
+    let code = secret.code_at(app.now).unwrap();
+    assert_eq!(
+        app.step_up_password(&mut browser, PASSWORD, &code)
+            .err()
+            .and_then(|error| error.retry_after_secs()),
+        Some(300)
+    );
+}
+
+// ---- step-up failures per session ----
+
+fn per_session(limit: u32) -> App {
+    App::with_config(
+        latchkey::Config::builder(OWNER, common::ORIGIN)
+            .password(common::cheap())
+            .step_up_failures(StepUpFailures::PerSession { limit }),
+    )
+}
+
+#[test]
+fn per_session_wrong_step_ups_end_that_session_and_leave_the_account_alone() {
+    let mut app = per_session(5);
+    let mut browser = Browser::default();
+    let (secret, _) = app.setup_owner(&mut browser);
+    let code = secret.code_at(app.now).unwrap();
+    for guess in 1..5 {
+        let wrong = if guess % 2 == 0 {
+            app.step_up_password(&mut browser, PASSWORD, "000000")
+        } else {
+            app.step_up_password(&mut browser, "wrong password!!", &code)
+        };
+        assert_eq!(wrong.err(), Some(Error::SignInFailed));
+        assert_eq!(app.session_of(&browser).unwrap().step_up_failures, guess);
+    }
+    let owner = app.owner_id();
+    assert_eq!(app.account(owner).unwrap().lockout.failures, 0);
+    let key = latchkey::account::AccountKey::from_login(OWNER);
+    assert!(app.throttle.window(&key).is_empty());
+
+    let fifth = app.step_up_password(&mut browser, "wrong password!!", &code);
+    assert_eq!(fifth.err(), Some(Error::SessionEnded));
+    assert_eq!(Error::SessionEnded.code(), "session_ended");
+    assert!(browser.session_cookie().is_none(), "the cookie is cleared");
+    assert!(app.sessions.is_empty(), "the session is gone");
+    assert_eq!(app.audit_count(AuditKind::SessionRevoked), 1);
+    assert_eq!(app.audit_count(AuditKind::SignInFailed), 5);
+    assert_eq!(app.account(owner).unwrap().lockout, Lockout::default());
+
+    app.advance(Duration::seconds(30));
+    assert!(
+        app.sign_in(&mut browser, OWNER, PASSWORD, &secret).is_ok(),
+        "signing in again is not blocked"
+    );
+}
+
+#[test]
+fn per_session_counts_are_kept_apart() {
+    let mut app = per_session(2);
+    let mut laptop = Browser::default();
+    let (secret, _) = app.setup_owner(&mut laptop);
+    let mut phone = Browser::default();
+    app.advance(Duration::seconds(30));
+    app.sign_in(&mut phone, OWNER, PASSWORD, &secret).unwrap();
+    assert_eq!(
+        app.step_up_password(&mut laptop, "wrong password!!", "000000")
+            .err(),
+        Some(Error::SignInFailed)
+    );
+    assert_eq!(
+        app.step_up_password(&mut laptop, "wrong password!!", "000000")
+            .err(),
+        Some(Error::SessionEnded)
+    );
+    assert!(app.session_of(&laptop).is_none());
+    let phone_session = app.session_of(&phone).unwrap();
+    assert_eq!(phone_session.step_up_failures, 0);
+    app.advance(Duration::seconds(30));
+    let code = secret.code_at(app.now).unwrap();
+    assert!(app.step_up_password(&mut phone, PASSWORD, &code).is_ok());
+}
+
+#[test]
+fn per_session_a_locked_account_can_still_step_up_and_success_clears_both_counts() {
+    let mut app = per_session(5);
+    let mut browser = Browser::default();
+    let (secret, _) = app.setup_owner(&mut browser);
+    assert_eq!(
+        app.step_up_password(&mut browser, PASSWORD, "000000").err(),
+        Some(Error::SignInFailed)
+    );
+    for _ in 0..5 {
+        let _ = app.password_step(&mut Browser::default(), OWNER, "wrong password!!");
+    }
+    let owner = app.owner_id();
+    assert!(app.account(owner).unwrap().lockout.check(app.now).is_err());
+    let key = latchkey::account::AccountKey::from_login(OWNER);
+    for _ in 0..10 {
+        let now = app.now;
+        app.throttle.record(&key, now);
+    }
+    assert!(app.throttle.check(&key, app.now).is_err());
+
+    let code = secret.code_at(app.now).unwrap();
+    let done = app.step_up_password(&mut browser, PASSWORD, &code);
+    assert!(matches!(done, Ok(StepUp::Done { .. })), "{done:?}");
+    assert_eq!(app.session_of(&browser).unwrap().step_up_failures, 0);
+    assert_eq!(app.account(owner).unwrap().lockout, Lockout::default());
+}
+
+#[test]
+fn per_session_a_session_already_at_the_limit_is_ended() {
+    let mut app = per_session(3);
+    let mut browser = Browser::default();
+    let (secret, _) = app.setup_owner(&mut browser);
+    // Guesses that raced can leave the stored count at the limit with the session alive.
+    let hash = app.session_of(&browser).unwrap().token_hash;
+    app.sessions.get_mut(&hash).unwrap().step_up_failures = 3;
+    let code = secret.code_at(app.now).unwrap();
+    assert_eq!(
+        app.step_up_password(&mut browser, PASSWORD, &code).err(),
+        Some(Error::SessionEnded)
+    );
+    assert!(app.sessions.is_empty());
+}
+
+#[test]
+fn per_session_passkeys_are_not_guesses_but_respect_an_ended_session() {
+    let mut app = per_session(1);
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    for _ in 0..3 {
+        assert_eq!(
+            app.step_up_passkey(&mut browser, false).err(),
+            Some(Error::SignInFailed)
+        );
+    }
+    assert_eq!(app.session_of(&browser).unwrap().step_up_failures, 0);
+    assert!(app.step_up_passkey(&mut browser, true).is_ok());
+    let hash = app.session_of(&browser).unwrap().token_hash;
+    app.sessions.get_mut(&hash).unwrap().step_up_failures = 1;
+    assert_eq!(
+        app.step_up_passkey(&mut browser, true).err(),
+        Some(Error::SessionEnded)
+    );
+    assert!(app.sessions.is_empty());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn per_session_the_limit_th_wrong_guess_ends_the_session(
+        limit in 1u32..7,
+        guesses in 0u32..10,
+    ) {
+        let mut app = per_session(limit);
+        let mut browser = Browser::default();
+        app.setup_owner(&mut browser);
+        for guess in 1..=guesses {
+            let refused = app.step_up_password(&mut browser, "wrong password!!", "000000");
+            let expected = match guess.cmp(&limit) {
+                std::cmp::Ordering::Less => Error::SignInFailed,
+                std::cmp::Ordering::Equal => Error::SessionEnded,
+                std::cmp::Ordering::Greater => Error::Unauthorized,
+            };
+            proptest::prop_assert_eq!(refused.err(), Some(expected));
+        }
+        proptest::prop_assert_eq!(app.session_of(&browser).is_some(), guesses < limit);
+        let owner = app.owner_id();
+        proptest::prop_assert_eq!(app.account(owner).unwrap().lockout, Lockout::default());
+    }
 }
 
 // ---- invites ----

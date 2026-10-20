@@ -20,8 +20,9 @@ SQLite database keeps working with the app's own queries.
 3. Keep 0.2's tables (`latchkey_users`, `latchkey_sessions`, `latchkey_tokens`,
    `latchkey_totp`, `latchkey_passkeys`, `latchkey_recovery_codes`, `latchkey_devices`,
    `latchkey_audit`) and write queries for them: build `Account` from a user row (factors from
-   the totp, passkey and password columns), `Session` from a session row, `LinkToken` from a
-   token row. Names (`Stage`, `SignInMethod`, `LinkKind`, `AuditKind`, `Role`) parse from and
+   the totp, passkey and password columns), `Session` from a session row (0.2 has no
+   `step_up_failures` column: use 0, or add one if you opt into
+   `StepUpFailures::PerSession`), `LinkToken` from a token row. Names (`Stage`, `SignInMethod`, `LinkKind`, `AuditKind`, `Role`) parse from and
    print to the stored strings; `TotpStep::try_from(i64)` reads `last_step`.
 4. Write one `apply(effects)` function that handles every `flow::Effect` variant, with
    compare-and-set for `UseTotpStep`/`UseRecoveryCode`, an atomic `failures = failures + 1`

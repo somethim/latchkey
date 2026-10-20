@@ -31,6 +31,13 @@ app side right is what keeps sign-in secure.
   computed from the `Account` snapshot; then set `locked_until` from
   `config.lockout().locked_until(n, at)` and append `config.lockout().lockout_event(..)` when
   `Some`. `Effect::ClearFailures` resets both.
+- Step-up guesses count towards the account lockout unless the config sets
+  `step_up_failures(StepUpFailures::PerSession { limit })`. Then store a
+  `step_up_failures` count on each session row, load it into `Session::step_up_failures`, apply
+  `Effect::RecordStepUpFailure` as an atomic `step_up_failures = step_up_failures + 1` in the
+  same transaction, `Effect::ClearStepUpFailures` as a reset, and the `DeleteSession` that
+  follows at the limit; answer `Error::SessionEnded` by sending the user to sign in again.
+  Pass `FailureWindow::default()` as `wrong_passwords` in that mode: it is not consulted.
 - Redeem links atomically (`DELETE ... RETURNING`), then pass the deleted `LinkToken` (or
   `None`) to the flow.
 

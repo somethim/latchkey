@@ -27,7 +27,8 @@ pub enum AuditKind {
     Lockout,
     /// A session was signed out.
     SignOut,
-    /// A session was revoked from the sessions list.
+    /// A session was revoked: from the sessions list, or (with detail `step_up_failures`) by
+    /// the per-session step-up limit.
     SessionRevoked,
     /// A step-up re-authentication.
     StepUp,

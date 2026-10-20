@@ -115,6 +115,7 @@ pub mod totp;
 pub use account::{Account, Email, Factors, Lockout, LockoutPolicy, Role};
 pub use config::{Config, ConfigBuilder};
 pub use error::Error;
+pub use flow::step_up::StepUpFailures;
 pub use ids::{CeremonyId, PasskeyId, SessionId, UserId};
 pub use rand_core::CryptoRng;
 

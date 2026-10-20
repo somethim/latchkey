@@ -195,6 +195,26 @@ pub enum Effect {
         /// Whose.
         user_id: UserId,
     },
+    /// Count one wrong step-up guess against this session, **atomically**: `UPDATE sessions
+    /// SET step_up_failures = step_up_failures + 1 WHERE token_hash = ? RETURNING
+    /// step_up_failures`. Only under
+    /// [`StepUpFailures::PerSession`](step_up::StepUpFailures::PerSession). When the guess
+    /// reaches the limit the flow also ends the session (with
+    /// [`DeleteSession`](Effect::DeleteSession)); an app may end it as soon as the returned
+    /// count satisfies
+    /// [`StepUpFailures::ends_session`](step_up::StepUpFailures::ends_session), which also
+    /// covers guesses that raced, and otherwise the next step-up from it is refused and ends
+    /// it.
+    RecordStepUpFailure {
+        /// The session's token hash.
+        token_hash: TokenHash,
+    },
+    /// Reset this session's step-up failure count to 0, after a step-up succeeded. Only under
+    /// [`StepUpFailures::PerSession`](step_up::StepUpFailures::PerSession).
+    ClearStepUpFailures {
+        /// The session's token hash.
+        token_hash: TokenHash,
+    },
     /// Record a wrong password for the throttle
     /// ([`WrongPasswordThrottle::record`](crate::limits::WrongPasswordThrottle::record)).
     RecordWrongPassword {
@@ -348,6 +368,7 @@ fn start_session<R: CryptoRng + ?Sized>(
         authenticated_at: (stage == Stage::Full).then_some(now),
         ip_tag: client.ip_tag.clone(),
         user_agent: client.user_agent.clone(),
+        step_up_failures: 0,
     };
     let effects = vec![
         Effect::StoreSession {

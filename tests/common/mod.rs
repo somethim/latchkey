@@ -224,23 +224,17 @@ impl App {
                     user_id,
                     at,
                     ip_tag,
-                } => {
-                    // The atomic increment a database does in one statement.
-                    let row = self.rows.get_mut(&user_id).unwrap();
-                    row.lockout.failures = row.lockout.failures.saturating_add(1);
-                    let failures = row.lockout.failures;
-                    let policy = *self.config.lockout();
-                    if let Some(until) = policy.locked_until(failures, at) {
-                        row.lockout.locked_until = Some(until);
-                    }
-                    if let Some(event) = policy.lockout_event(user_id, failures, at, ip_tag) {
-                        self.audit.push(event);
-                    }
-                }
+                } => self.record_failure(user_id, at, ip_tag),
                 Effect::ClearFailures { user_id } => {
                     self.rows.get_mut(&user_id).unwrap().lockout = Lockout::default();
                 }
                 Effect::RecordWrongPassword { key } => self.throttle.record(&key, self.now),
+                Effect::RecordStepUpFailure { token_hash } => {
+                    self.set_step_up_failures(token_hash, |n| n.saturating_add(1));
+                }
+                Effect::ClearStepUpFailures { token_hash } => {
+                    self.set_step_up_failures(token_hash, |_| 0);
+                }
                 Effect::UseTotpStep { user_id, step } => {
                     let row = self.rows.get_mut(&user_id).unwrap();
                     if row.last_step.is_some_and(|last| last >= step) {
@@ -305,6 +299,32 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// The atomic increment a database does in one statement.
+    fn record_failure(
+        &mut self,
+        user_id: UserId,
+        at: OffsetDateTime,
+        ip_tag: Option<latchkey::http::IpTag>,
+    ) {
+        let row = self.rows.get_mut(&user_id).unwrap();
+        row.lockout.failures = row.lockout.failures.saturating_add(1);
+        let failures = row.lockout.failures;
+        let policy = *self.config.lockout();
+        if let Some(until) = policy.locked_until(failures, at) {
+            row.lockout.locked_until = Some(until);
+        }
+        if let Some(event) = policy.lockout_event(user_id, failures, at, ip_tag) {
+            self.audit.push(event);
+        }
+    }
+
+    /// The atomic update a database does in one statement, as for `RecordFailure`.
+    fn set_step_up_failures(&mut self, token_hash: TokenHash, to: impl FnOnce(u32) -> u32) {
+        if let Some(session) = self.sessions.get_mut(&token_hash) {
+            session.step_up_failures = to(session.step_up_failures);
+        }
     }
 
     /// Applies a refusal's effects and returns its error.
@@ -604,16 +624,43 @@ impl App {
         let matched = self.hasher.verify(password, stored.as_ref());
         let material = self.material(user);
         let client = self.client(browser, Some(user));
-        match state.advance(
+        self.finish_step_up(
+            state.advance(
+                &self.config,
+                StepUpEvent::PasswordChecked {
+                    matched,
+                    code: code.to_owned(),
+                    material,
+                    client,
+                },
+                self.now,
+            ),
+            browser,
+        )
+    }
+
+    pub fn step_up_passkey(
+        &mut self,
+        browser: &mut Browser,
+        verified: bool,
+    ) -> Result<StepUp, Error> {
+        let session = self.session_of(browser).ok_or(Error::Unauthorized)?;
+        let account = self.account(session.user_id).ok_or(Error::Unauthorized)?;
+        let client = self.client(browser, Some(account.id));
+        let step = StepUp::new(account, session).advance(
             &self.config,
-            StepUpEvent::PasswordChecked {
-                matched,
-                code: code.to_owned(),
-                material,
-                client,
-            },
+            StepUpEvent::Passkey { verified, client },
             self.now,
-        ) {
+        );
+        self.finish_step_up(step, browser)
+    }
+
+    fn finish_step_up(
+        &mut self,
+        step: Result<latchkey::flow::Transition<StepUp>, Refusal>,
+        browser: &mut Browser,
+    ) -> Result<StepUp, Error> {
+        match step {
             Ok(step) => {
                 self.apply(step.effects, browser)?;
                 Ok(step.state)

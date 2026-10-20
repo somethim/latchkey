@@ -28,7 +28,7 @@ audit trail, now as pure functions and state machines.
 | `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
 | `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
 | `limits` | `RateLimiter` (fixed windows), `WrongPasswordThrottle` (sliding window), and their per-key states |
-| `session` | `Session` records, `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
+| `session` | `Session` records (with their step-up failure count), `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
 | `flow` | `sign_in`, `email_link`, `setup`, `invite`, `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
 | `mail` | `Mail` with `subject()` and `text()` for setup, sign-in link, invite and new-device mail |
 | `audit` | `AuditEvent` and `AuditKind` |
@@ -71,7 +71,8 @@ expensive hash, and an unknown address still costs a full (dummy) hash.
 Effects are values: `StoreSession { session, replaces }`, `DeleteSession`, `SetCookie`,
 `RecordFailure`, `ClearFailures`, `RecordWrongPassword`, `UseTotpStep`, `UseRecoveryCode`, `StoreRecoveryCodes`,
 `StoreLinkToken`, `SendMail`, `Audit`, `RememberDevice`, `CreateAccount`, `StorePassword`,
-`ActivateAccount`, `MarkStepUp`. Carry out every one, in order: storage effects ideally in one
+`ActivateAccount`, `MarkStepUp`, and with per-session step-up failures `RecordStepUpFailure`
+and `ClearStepUpFailures`. Carry out every one, in order: storage effects ideally in one
 transaction, then mail. `UseTotpStep` and `UseRecoveryCode` are compare-and-set: if the stored
 step is already as new, or the code already used, the request lost a race and must be refused.
 `RecordFailure` must be **one atomic statement** that increments the stored count
@@ -79,6 +80,33 @@ step is already as new, or the code already used, the request lost a race and mu
 computed from the `Account` snapshot, so failures that race are all counted; then store
 `config.lockout().locked_until(n, at)` and append `config.lockout().lockout_event(user, n, at,
 ip_tag)` when they are `Some`. `ClearFailures` resets the count and the lock.
+
+### Where wrong step-up guesses count
+
+By default (`StepUpFailures::AccountLockout`) a wrong password or code at step-up counts like
+a sign-in failure: towards the account lockout and the wrong-password throttle, and a locked
+account cannot step up. That lets anyone holding a stolen session cookie lock the real owner
+out, and lets anonymous sign-in guesses stop a signed-in owner from re-verifying. To count
+them per session instead:
+
+```rust,ignore
+let config = Config::builder("owner@example.com", "https://home.example.com")
+    .step_up_failures(StepUpFailures::PerSession { limit: 5 })
+    .build()?;
+```
+
+Then step-up neither consults nor feeds the lockout and throttle. Each wrong guess emits
+`RecordStepUpFailure { token_hash }`: increment `sessions.step_up_failures` atomically in the
+same transaction (`UPDATE sessions SET step_up_failures = step_up_failures + 1 WHERE
+token_hash = ? RETURNING step_up_failures`). Load that column into `Session::step_up_failures`
+when you rebuild the session. The guess that reaches `limit` also emits `DeleteSession`, a
+cookie removal and a `session_revoked` audit event (detail `step_up_failures`), and the
+refusal is `Error::SessionEnded` (`session_ended`, 401): sign in again. A session whose stored
+count already reached the limit (guesses that raced) is refused and ended the same way on its
+next step-up; to end it at once, check `config.step_up_failures().ends_session(n)` on the
+count the increment returned. A successful step-up emits `ClearStepUpFailures` and still
+`ClearFailures`, so a full proof lifts an account lock. A passkey that fails to verify is not
+counted in either mode.
 
 ## Example: password + TOTP with your own storage
 
@@ -142,6 +170,10 @@ fn apply(effects: Vec<Effect>) -> Result<(), Error> {
             }
             Effect::ClearFailures { user_id } => { /* failures = 0, locked_until = NULL */ }
             Effect::RecordWrongPassword { key } => throttle.record(&key, now),
+            Effect::RecordStepUpFailure { token_hash } => {
+                // StepUpFailures::PerSession only. One statement:
+                // UPDATE sessions SET step_up_failures = step_up_failures + 1 WHERE token_hash = ?
+            }
             Effect::UseTotpStep { user_id, step } => {
                 // UPDATE ... SET last_step = ? WHERE user_id = ? AND (last_step IS NULL OR last_step < ?)
                 // zero rows updated: refuse with Error::SignInFailed
@@ -220,7 +252,8 @@ user handle differs; the device cookie is still set on every completed sign-in.
 - Every stage change issues a new session token (`StoreSession { replaces }`).
 - The wrong-password throttle (10 per 15 minutes per address) counts unknown addresses too and
   is checked before hashing; the lockout (5 failures: 5 minutes, doubling to an hour) is
-  per account.
+  per account. Step-up guesses count towards both unless `Config::step_up_failures` is
+  `PerSession { limit }`, which bounds each session to `limit` wrong guesses and then ends it.
 - Sealed values use a random 96-bit nonce and associated data `latchkey-totp:<user>` or
   `latchkey-passkey:<user>:<passkey>`; `Aad::app(context)` is for the app's own secrets.
 - Secret types (`SecretToken`, `TotpSecret`, `RecoveryCode`, `PasswordHash`, `SetCookie`,

@@ -38,6 +38,11 @@ pub enum Error {
         /// Seconds until the next attempt can succeed; at least 1.
         retry_after_secs: u64,
     },
+    /// The session made too many wrong step-up guesses and was ended (see
+    /// [`StepUpFailures::PerSession`](crate::flow::step_up::StepUpFailures::PerSession)): sign
+    /// in again.
+    #[error("the session was ended after too many wrong step-up attempts")]
+    SessionEnded,
     /// A configuration value is unusable.
     #[error("configuration: {0}")]
     Config(&'static str),
@@ -67,6 +72,7 @@ impl Error {
             Error::InvalidRequest(_) => "invalid_request",
             Error::Conflict(_) => "conflict",
             Error::TooManyAttempts { .. } => "too_many_attempts",
+            Error::SessionEnded => "session_ended",
             Error::Config(_) | Error::Crypto(_) | Error::Rng => "internal",
         }
     }
@@ -79,7 +85,10 @@ impl Error {
     #[must_use]
     pub fn http_status(&self) -> u16 {
         match self {
-            Error::Unauthorized | Error::SignInFailed | Error::StepUpRequired => 401,
+            Error::Unauthorized
+            | Error::SignInFailed
+            | Error::StepUpRequired
+            | Error::SessionEnded => 401,
             Error::Forbidden | Error::CsrfRejected => 403,
             Error::NotFound => 404,
             Error::InvalidRequest(_) => 400,

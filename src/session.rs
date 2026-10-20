@@ -222,6 +222,12 @@ pub struct Session {
     pub ip_tag: Option<IpTag>,
     /// The client's user agent, shortened.
     pub user_agent: Option<String>,
+    /// Wrong step-up guesses made from this session, counted only under
+    /// [`StepUpFailures::PerSession`](crate::flow::step_up::StepUpFailures::PerSession)
+    /// ([`Effect::RecordStepUpFailure`](crate::flow::Effect::RecordStepUpFailure)); 0
+    /// otherwise.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub step_up_failures: u32,
 }
 
 /// What a request needs from its session.
@@ -320,6 +326,7 @@ mod tests {
             authenticated_at: (stage == Stage::Full).then(|| at(0)),
             ip_tag: None,
             user_agent: None,
+            step_up_failures: 0,
         }
     }
 
@@ -428,8 +435,13 @@ mod tests {
         let json = serde_json::to_value(&full).unwrap();
         assert_eq!(json["stage"], "full");
         assert_eq!(json["method"], "password+totp");
-        let back: Session = serde_json::from_value(json).unwrap();
+        let mut json = json;
+        assert_eq!(json["step_up_failures"], 0);
+        let back: Session = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back, full);
+        json.as_object_mut().unwrap().remove("step_up_failures");
+        let stored_before_the_count: Session = serde_json::from_value(json).unwrap();
+        assert_eq!(stored_before_the_count, full);
     }
 
     #[test]

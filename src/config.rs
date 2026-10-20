@@ -18,12 +18,14 @@ use url::Url;
 
 use crate::Error;
 use crate::account::{Email, LockoutPolicy};
+use crate::flow::step_up::StepUpFailures;
 use crate::http::CookieName;
 use crate::limits::RateLimits;
 use crate::password::PasswordParams;
 
 /// Validated settings: the origin and relying party, cookie names, mailed link targets,
-/// lifetimes and the lockout, rate-limit and password parameters. Build it with
+/// lifetimes, the lockout and step-up failure policies and the rate-limit and password
+/// parameters. Build it with
 /// [`Config::builder`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -40,6 +42,7 @@ pub struct Config {
     sessions_url: Url,
     durations: Durations,
     lockout: LockoutPolicy,
+    step_up_failures: StepUpFailures,
     rate_limits: RateLimits,
     password: PasswordParams,
 }
@@ -88,6 +91,7 @@ pub struct ConfigBuilder {
     sessions_path: String,
     durations: Durations,
     lockout: LockoutPolicy,
+    step_up_failures: StepUpFailures,
     rate_limits: RateLimits,
     password: PasswordParams,
 }
@@ -198,6 +202,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// Where wrong step-up guesses count. Default [`StepUpFailures::AccountLockout`], as in
+    /// latchkey 0.2.
+    pub fn step_up_failures(mut self, policy: StepUpFailures) -> Self {
+        self.step_up_failures = policy;
+        self
+    }
+
     /// The rate limits and wrong-password throttle.
     pub fn rate_limits(mut self, rate_limits: RateLimits) -> Self {
         self.rate_limits = rate_limits;
@@ -216,7 +227,8 @@ impl ConfigBuilder {
     ///
     /// [`Error::Config`] when the origin is not an `https` URL (or `http://localhost`), the
     /// owner address or a cookie name is invalid, the cookie names are equal, or a path does
-    /// not join onto the origin. [`Error::InvalidRequest`] with `email` for a bad owner
+    /// not join onto the origin, or a [`StepUpFailures::PerSession`] limit is 0.
+    /// [`Error::InvalidRequest`] with `email` for a bad owner
     /// address.
     pub fn build(self) -> Result<Config, Error> {
         let origin = Url::parse(&self.origin).map_err(|_| Error::Config("origin is not a URL"))?;
@@ -242,6 +254,11 @@ impl ConfigBuilder {
                 .join(path)
                 .map_err(|_| Error::Config("a path does not join onto the origin"))
         };
+        if self.step_up_failures == (StepUpFailures::PerSession { limit: 0 }) {
+            return Err(Error::Config(
+                "the step-up failure limit must be at least 1",
+            ));
+        }
         let rp_id = self.rp_id.unwrap_or(host);
         Ok(Config {
             setup_url: join(&self.setup_path)?,
@@ -259,6 +276,7 @@ impl ConfigBuilder {
             origin,
             durations: self.durations,
             lockout: self.lockout,
+            step_up_failures: self.step_up_failures,
             rate_limits: self.rate_limits,
             password: self.password,
         })
@@ -283,6 +301,7 @@ impl Config {
             sessions_path: "/settings/sessions".to_owned(),
             durations: Durations::default(),
             lockout: LockoutPolicy::default(),
+            step_up_failures: StepUpFailures::default(),
             rate_limits: RateLimits::default(),
             password: PasswordParams::default(),
         }
@@ -366,6 +385,12 @@ impl Config {
         &self.lockout
     }
 
+    /// Where wrong step-up guesses count.
+    #[must_use]
+    pub fn step_up_failures(&self) -> StepUpFailures {
+        self.step_up_failures
+    }
+
     /// The rate limits.
     #[must_use]
     pub fn rate_limits(&self) -> &RateLimits {
@@ -400,6 +425,7 @@ mod tests {
         );
         assert_eq!(config.owner_name(), "o@example.com");
         assert_eq!(config.rp_name(), "home.example.com");
+        assert_eq!(config.step_up_failures(), StepUpFailures::AccountLockout);
         Ok(())
     }
 
@@ -432,6 +458,21 @@ mod tests {
             Config::builder("o@example.com", "not a url")
                 .build()
                 .is_err()
+        );
+        assert_eq!(
+            builder()
+                .step_up_failures(StepUpFailures::PerSession { limit: 0 })
+                .build()
+                .err(),
+            Some(Error::Config(
+                "the step-up failure limit must be at least 1"
+            ))
+        );
+        assert!(
+            builder()
+                .step_up_failures(StepUpFailures::PerSession { limit: 5 })
+                .build()
+                .is_ok()
         );
     }
 }

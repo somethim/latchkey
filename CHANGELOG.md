@@ -6,6 +6,29 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `StepUpFailures` (`flow::step_up`, re-exported at the root) and
+  `ConfigBuilder::step_up_failures` / `Config::step_up_failures`: with
+  `StepUpFailures::PerSession { limit }`, wrong step-up guesses count against the session
+  instead of the account. Step-up then neither checks nor feeds the account lockout and the
+  wrong-password throttle, and the guess that reaches `limit` ends the session. The default,
+  `StepUpFailures::AccountLockout`, keeps the old behaviour.
+- `Session::step_up_failures`, the per-session count the app stores and loads (`serde`
+  defaults it to 0).
+- `Effect::RecordStepUpFailure` (an atomic increment of the session's count) and
+  `Effect::ClearStepUpFailures`, emitted only in per-session mode.
+- `Error::SessionEnded` (`session_ended`, 401) for the step-up that ends its session.
+- `StepUpFailures::ends_session(n)` for apps that end the session from the count their
+  increment returned.
+
+### Changed
+
+- `Session` has a new public field, `step_up_failures`; code that builds a `Session` with a
+  struct literal must set it (0 when step-up failures count against the account).
+- `AuditKind::SessionRevoked` also records a session ended by the step-up limit, with detail
+  `step_up_failures`.
+
 ## [0.3.0-dev]
 
 latchkey is now a sans-IO library: building blocks and sign-in policy as pure functions and
