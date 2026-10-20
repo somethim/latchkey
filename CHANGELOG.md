@@ -6,6 +6,11 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+The first release of the sans-IO rewrite: everything under 0.3.0-dev below, and the
+following.
+
 ### Added
 
 - `StepUpFailures` (`flow::step_up`, re-exported at the root) and
@@ -206,7 +211,8 @@ See "Porting from 0.2" in the README.
 - `Store` trait with a SQLite implementation and its own migration table.
 - `Mailer` trait and an in-memory `TestMailer`.
 
-[Unreleased]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/somethim/latchkey/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/somethim/latchkey/releases/tag/v0.3.0
 [0.3.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
 [0.2.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/somethim/latchkey/releases/tag/v0.1.0

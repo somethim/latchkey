@@ -178,7 +178,7 @@ impl ConfigBuilder {
     }
 
     /// The name of the cookie that binds a passkey sign-in to the browser that started it
-    /// (see [`passkey`](crate::passkey) with the `passkeys` feature); must start with
+    /// (the `passkey` module, feature `passkeys`); must start with
     /// `__Host-` and differ from the other two. Default `__Host-latchkey_ceremony`.
     pub fn ceremony_cookie_name(mut self, name: &str) -> Self {
         name.clone_into(&mut self.ceremony_cookie_name);

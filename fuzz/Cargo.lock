@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "latchkey"
-version = "0.3.0-dev"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "argon2",
