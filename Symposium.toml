@@ -1,0 +1,3 @@
+# Symposium plugin for latchkey (https://symposium.dev). The skills in skills/ are
+# installed for projects that depend on latchkey; not in latchkey's own repository.
+predicates = ["not(workspace-member())"]

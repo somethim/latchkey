@@ -1,0 +1,43 @@
+# cargo-deny configuration: `cargo deny --all-features check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+    # webauthn-rs and its crates (feature `passkeys`): file-level copyleft, compatible with
+    # latchkey's MIT OR Apache-2.0 since latchkey does not modify them.
+    "MPL-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # latchkey is sans-IO: none of these may come back as dependencies.
+    { name = "tokio" },
+    { name = "sqlx" },
+    { name = "axum" },
+    { name = "hyper" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
