@@ -93,7 +93,7 @@ impl DataKey {
         if sealed.len() < NONCE_LEN + TAG_LEN {
             return None;
         }
-        let (nonce_bytes, ciphertext) = sealed.split_at(NONCE_LEN);
+        let (nonce_bytes, ciphertext) = sealed.split_at_checked(NONCE_LEN)?;
         let nonce = Nonce::try_from(nonce_bytes).ok()?;
         let aad = aad.bytes();
         self.cipher
