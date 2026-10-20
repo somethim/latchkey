@@ -57,7 +57,8 @@ foreign session with a latchkey one on first use.
 
 ## Passwords and TOTP from another system
 
-- Argon2id PHC strings load with `PasswordHash::try_from`. After a successful
+- Argon2id PHC strings load with `PasswordHash::try_from`; argon2i, argon2d or older
+  versions with `PasswordHash::from_legacy_argon2`. After a successful
   `hasher.verify`, `hasher.needs_rehash(&stored)` says whether to hash the password again
   with `hasher.hash` (not `hash_new_password`) and store it: that upgrades weaker or
   imported parameters as users sign in. Hashes in other formats do not verify.
@@ -65,6 +66,13 @@ foreign session with a latchkey one on first use.
   `DataKey::seal_totp`. Secrets under 128 bits (16-character, 80-bit secrets) are refused:
   ask those accounts to enrol again, and allow sign-in meanwhile only if you opt into
   `PasswordOnly::AllowedUntilEnrolled`.
+
+## From a 0.3.0-dev build
+
+Apps already on 0.3.0-dev (crates.io or git) follow the "Migrating from 0.3.0-dev" table in the
+README: constructors instead of struct literals, typed error reasons, `PasskeyOnly`,
+`password_params`, `&str` URLs, `Started`/`SignInStarted` from passkey starts,
+`RegistrationRequest`, `into_state(session, user, now)`, and `TotpSecret::from_bytes(..)?`.
 
 ## Pitfalls
 

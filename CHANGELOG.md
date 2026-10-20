@@ -8,24 +8,12 @@ All notable changes to this crate are documented here. The format follows
 
 ## [0.3.0] - 2026-10-20
 
-The first release of the sans-IO rewrite: everything under 0.3.0-dev below, and the
-following.
+Builds on 0.3.0-dev with the gaps found while porting apps onto it and an API cleanup
+before the first stable 0.3 release. Apps on 0.3.0-dev: see "Migrating from 0.3.0-dev" in
+the README.
 
 ### Added
 
-- `StepUpFailures` (`flow::step_up`, re-exported at the root) and
-  `ConfigBuilder::step_up_failures` / `Config::step_up_failures`: with
-  `StepUpFailures::PerSession { limit }`, wrong step-up guesses count against the session
-  instead of the account. Step-up then neither checks nor feeds the account lockout and the
-  wrong-password throttle, and the guess that reaches `limit` ends the session. The default,
-  `StepUpFailures::AccountLockout`, keeps the old behaviour.
-- `Session::step_up_failures`, the per-session count the app stores and loads (`serde`
-  defaults it to 0).
-- `Effect::RecordStepUpFailure` (an atomic increment of the session's count) and
-  `Effect::ClearStepUpFailures`, emitted only in per-session mode.
-- `Error::SessionEnded` (`session_ended`, 401) for the step-up that ends its session.
-- `StepUpFailures::ends_session(n)` for apps that end the session from the count their
-  increment returned.
 - `PasswordOnly` (`account`, re-exported at the root) and `ConfigBuilder::password_only` /
   `Config::password_only`: with `PasswordOnly::AllowedUntilEnrolled`, an account with a
   password and no second factor (imported, or not enrolled yet) finishes sign-in, step-up,
@@ -39,8 +27,8 @@ following.
   `Binding::user()` naming the account whose passkeys to load before finishing.
 - `RelyingParty::start_sign_in(user, passkeys, now, rng)`: a passkey sign-in with an
   allow-list before any session exists. It and `start_discoverable` bind their ceremony to
-  the browser with a one-off binding token (returned as a `SecretToken`; the ceremony keeps
-  only its hash), finished with `Ceremony::into_browser_state(binding_token, now)`.
+  the browser with a one-off binding token (`SignInStarted::binding_token`; the ceremony
+  keeps only its hash), finished with `Ceremony::into_browser_state(binding_token, now)`.
 - `ConfigBuilder::ceremony_cookie_name` / `Config::ceremony_cookie_name` (default
   `__Host-latchkey_ceremony`) for the binding token's cookie.
 - `TokenHash::of_foreign` hashes tokens latchkey did not issue (22 to 512 bytes of
@@ -56,31 +44,73 @@ following.
   after a successful `verify`.
 - `TotpSecret::from_base32` and `totp::MIN_SECRET_BYTES` for importing TOTP secrets another
   system enrolled (80-bit secrets are refused: those accounts enrol again).
+- `PasswordHash::from_legacy_argon2` for Argon2 hashes of other variants or versions,
+  which `verify` checks and `needs_rehash` flags.
+- Constructors for the records apps build: `Account::new`, `Factors::new`, `NewAccount::new`,
+  `Lockout::new`, `LockoutPolicy::new`, `RateLimits::new`, `Session::new`, `LinkToken::new`,
+  `Client::new` and `Client::with_device_cookie`, `TotpMaterial::new`, `CodeMaterial::new`,
+  `RequestHeaders::new`, `Mail::new`, `SignInDetails::new`, `Transition::new` and
+  `Refusal::new`.
+- `passkey::Started`, `passkey::SignInStarted` and `passkey::RegistrationRequest` (with
+  `new`, `for_account` and `excluding`).
+- The `error` module with `InvalidRequestReason`, `ConflictReason`, `ConfigReason` and
+  `CryptoReason`, each with `as_str()` (a stable code) and `message()`.
 
 ### Changed
 
-- `Session` has a new public field, `step_up_failures`; code that builds a `Session` with a
-  struct literal must set it (0 when step-up failures count against the account).
-- `AuditKind::SessionRevoked` also records a session ended by the step-up limit, with detail
-  `step_up_failures`.
+Breaking changes for apps on a 0.3.0-dev build; "Migrating from 0.3.0-dev" in the README
+shows each one as before and after.
+
+- Records are `#[non_exhaustive]`: `Account`, `Factors`, `NewAccount`, `Lockout`,
+  `LockoutPolicy`, `RateLimits`, `Session`, `LinkToken`, `Client`, `TotpMaterial`,
+  `CodeMaterial`, `RequestHeaders`, `Mail`, `SignInDetails`, `AuditEvent`, `Transition`,
+  `Refusal`, `IssuedToken`, `RecoveryCodes` and `Enrolment`. Build them with their
+  constructors and set public fields afterwards; struct literals and `..Default::default()`
+  no longer compile outside the crate. Fields stay readable and assignable.
+- The flow states `SignIn`, `Setup`, `EmailLink`, `Invite` and `StepUp` are
+  `#[non_exhaustive]`: a `match` on them needs a `_` arm.
+- `Error::InvalidRequest`, `Error::Conflict`, `Error::Config` and `Error::Crypto` carry
+  `InvalidRequestReason`, `ConflictReason`, `ConfigReason` and `CryptoReason` instead of
+  `&'static str`. `Error::detail()` returns the same codes as before.
+- `SignInEvent::DiscoverablePasskey` is `SignInEvent::PasskeyOnly`, and also reports
+  allow-list passkey sign-ins (`SignInMethod::Passkey`, still stored as `passkey`).
+- `ConfigBuilder::password` and `Config::password` are `password_params`.
+- `Config::origin`, `setup_url`, `sign_in_link_url`, `invite_url` and `sessions_url` return
+  `&str` instead of `&url::Url`; `Mail::link` is a `String`; `RelyingParty::from_parts`
+  takes the origin as `&str`. The `serde` feature no longer enables `url/serde`.
+- `os_rng()` returns `impl CryptoRng + Send + Sync` instead of `rand::rngs::StdRng`.
+- `RelyingParty::start_registration(RegistrationRequest, now, rng)` replaces the
+  seven-argument form. `start_registration` and `start_authentication` return
+  `Started { challenge, ceremony }`; `start_discoverable` and `start_sign_in` return
+  `SignInStarted { challenge, ceremony, binding_token }`.
 - `Ceremony::into_state(session, user, now)` takes the session and account instead of
-  `Option`s and only finishes session-bound ceremonies; `RelyingParty::start_discoverable`
-  also returns the binding token, and its ceremony is finished with `into_browser_state`.
-  Ceremonies stored by earlier 0.3.0-dev builds no longer deserialize (they expire after 5
-  minutes anyway).
-- `SignInEvent::DiscoverablePasskey` also reports allow-list passkey sign-ins
-  (`SignInMethod::Passkey`).
-- `ConfigBuilder::build` refuses any two equal cookie names (`Error::Config("cookie names
-  must differ")`).
+  `Option`s and only finishes session-bound ceremonies; discoverable ceremonies finish with
+  `into_browser_state`. Ceremonies stored by 0.3.0-dev builds no longer deserialize (they
+  expire after 5 minutes anyway).
+- `TotpSecret::from_bytes` returns a `Result` and refuses secrets under 128 bits;
+  `DataKey::open_totp` refuses such a stored secret.
+- `PasswordHash::try_from` accepts only Argon2id (version 19) PHC strings; other Argon2
+  hashes load with `PasswordHash::from_legacy_argon2`.
 - `PasswordHasher::verify` no longer runs a stored hash whose parameters cost more than
   1 GiB, 16 passes or 16 lanes (or the hasher's own, if higher): it checks the dummy and
   answers `false`. Argon2 verifies with the stored parameters, so an imported or tampered
   hash could hang a sign-in or exhaust memory.
-- An `http://127.0.0.1` or `http://[::1]` origin is accepted like `http://localhost`.
+- `ConfigBuilder::build` refuses any two equal cookie names, including the new ceremony
+  cookie (`ConfigReason::CookieNamesEqual`).
 - `password_only` is reserved like latchkey's other method names: `AppMethod::new` refuses
   it, and a stored `password_only` parses as `SignInMethod::PasswordOnly`.
+- The internal fuzzing feature is `_fuzzing` instead of `fuzzing`.
+- An `http://127.0.0.1` or `http://[::1]` origin is accepted like `http://localhost`.
 
-## [0.3.0-dev]
+### Removed
+
+- `flow::invite::optional_name`, `token::ct_eq` and `Lockout::after_failure` from the
+  public API (`after_failure` counted failures from a snapshot, which loses races; apply
+  `Effect::RecordFailure` as an atomic increment).
+
+## [0.3.0-dev] - 2026-10-20
+
+Published to crates.io from commit 4b99217.
 
 latchkey is now a sans-IO library: building blocks and sign-in policy as pure functions and
 state machines. The app owns storage, mail, HTTP, the clock and the random number generator.
@@ -127,8 +157,25 @@ See "Porting from 0.2" in the README.
 - Symposium agent skills `latchkey-basics` and `latchkey-porting` in `skills/`.
 - `deny.toml` and a GitHub Actions workflow.
 
+- Step-up failures per session:
+  - `StepUpFailures` (`flow::step_up`, re-exported at the root) and
+    `ConfigBuilder::step_up_failures` / `Config::step_up_failures`: with
+    `StepUpFailures::PerSession { limit }`, wrong step-up guesses count against the session
+    instead of the account. Step-up then neither checks nor feeds the account lockout and the
+    wrong-password throttle, and the guess that reaches `limit` ends the session. The default,
+    `StepUpFailures::AccountLockout`, keeps the old behaviour.
+  - `Session::step_up_failures`, the per-session count the app stores and loads (`serde`
+    defaults it to 0).
+  - `Effect::RecordStepUpFailure` (an atomic increment of the session's count) and
+    `Effect::ClearStepUpFailures`, emitted only in per-session mode.
+  - `Error::SessionEnded` (`session_ended`, 401) for the step-up that ends its session.
+  - `StepUpFailures::ends_session(n)` for apps that end the session from the count their
+    increment returned.
+
 ### Changed
 
+- `Session` has the public field `step_up_failures`; `AuditKind::SessionRevoked` also
+  records a session ended by the step-up limit, with detail `step_up_failures`.
 - Every function that needs the time takes `now`; every function that needs randomness takes
   a `CryptoRng` (webauthn-rs still draws its own challenges from OpenSSL).
 - Secrets are newtypes with redacted `Debug`, no `Display`, zeroed on drop.
@@ -213,6 +260,6 @@ See "Porting from 0.2" in the README.
 
 [Unreleased]: https://github.com/somethim/latchkey/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/somethim/latchkey/releases/tag/v0.3.0
-[0.3.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
+[0.3.0-dev]: https://github.com/somethim/latchkey/commit/4b99217faddc197923aa281a9bf622e1316f28cf
 [0.2.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/somethim/latchkey/releases/tag/v0.1.0

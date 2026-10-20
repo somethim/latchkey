@@ -19,7 +19,7 @@ audit trail, now as pure functions and state machines.
 
 | Module | What it does |
 |---|---|
-| `password` | `PasswordHasher`: Argon2id hash/verify, `needs_rehash` for hashes made with other parameters, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
+| `password` | `PasswordHasher`: Argon2id hash/verify, `needs_rehash` for hashes made with other parameters, `PasswordHash::from_legacy_argon2` for imports, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
 | `totp` | `TotpSecret` (`from_base32` to import), `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
 | `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
 | `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
@@ -45,6 +45,21 @@ audit trail, now as pure functions and state machines.
 
 Without `passkeys`, nothing links OpenSSL. The flows still accept a passkey result
 (`verified: bool`) from any WebAuthn library you prefer.
+
+### Public dependencies
+
+These crates' types appear in latchkey's API, so a breaking release of one of them means a
+breaking release of latchkey:
+
+| Crate | Where |
+|---|---|
+| `time` 0.3 | `OffsetDateTime` and `Duration` everywhere (`now`, expiry, lifetimes) |
+| `rand_core` 0.10 | `CryptoRng`, re-exported as `latchkey::CryptoRng`, for every `rng` |
+| `uuid` 1 | `UserId`, `SessionId`, `PasskeyId`, `CeremonyId` convert from and to `Uuid` |
+| `webauthn-rs` 0.5 | the `passkey` module's challenges, credentials and `Passkey` (feature `passkeys`); re-exported as `latchkey::passkey::webauthn_rs` so you use the same version |
+
+Everything else (`url`, `rand`, `argon2`, `totp-rs`, `aes-gcm` and the rest) stays private:
+URLs are `&str`, `os_rng()` returns `impl CryptoRng`.
 
 ## How the flows work
 
@@ -142,8 +157,8 @@ Registration, a passkey second factor and step-up run inside a session, and thei
 ceremonies are bound to it (`Binding::Session`, finished with `into_state(session.id, user,
 now)`). A passkey sign-in has no session yet: `RelyingParty::start_sign_in(user, passkeys,
 now, rng)` (the user typed their address; the challenge lists their passkeys) and
-`start_discoverable(now, rng)` return a third value, a one-off binding token. The ceremony
-keeps only its hash (`Binding::Browser`).
+`start_discoverable(now, rng)` return a `SignInStarted` whose `binding_token` is a one-off
+token for the browser's cookie. The ceremony keeps only its hash (`Binding::Browser`).
 
 ```rust
 #[cfg(feature = "passkeys")]
@@ -373,6 +388,35 @@ impl App {
 
 `examples/email_link.rs` and `examples/passkey_registration.rs` (feature `passkeys`) show
 the other two common paths.
+
+## Migrating from 0.3.0-dev
+
+Apps on latchkey 0.3.0-dev (from crates.io or git, such as Home and the portfolio) change these
+lines; the compiler finds each one.
+
+| 0.3.0-dev | 0.3.0 |
+|---|---|
+| `Account { id, email, .. }`, `Factors { .. }`, `Session { .. }`, `LinkToken { .. }`, `Client { .. }`, `CodeMaterial { .. }`, `TotpMaterial { .. }`, `RequestHeaders { .. }`, `Mail { .. }`, `NewAccount { .. }`, `Lockout { .. }` | `Account::new(id, email, role)` then assign `display_name`, `active`, `factors`, `lockout`; `Factors::new(password, totp, passkeys)`; `Session::new(id, token_hash, user_id, stage, csrf_token, created_at, expires_at)` then assign `method`, `authenticated_at`, `ip_tag`, `user_agent`, `step_up_failures`; `LinkToken::new(..)`; `Client::new(ip_tag, user_agent).with_device_cookie(cookie, known)`; `CodeMaterial::new(totp, recovery_codes)`; `TotpMaterial::new(secret, last_used_step)`; `RequestHeaders::new(method, origin, sec_fetch_site, csrf_token)`; `Mail::new(..)`; `NewAccount::new(..)`; `Lockout::new(failures, locked_until)` |
+| `LockoutPolicy { threshold: 0, ..LockoutPolicy::default() }`, `RateLimits { x, ..RateLimits::default() }` | `LockoutPolicy::new(threshold, base, max)`, `RateLimits::new(per_ip, per_account, wrong_passwords, window)`, or a `default()` with fields assigned |
+| `match state { SignIn::SignedIn { .. } => .., SignIn::Start => .. }` | add a `_` arm: flow states are `#[non_exhaustive]` |
+| `Error::InvalidRequest("no_passkey")`, `Error::Conflict("last_factor")`, `Error::Config(msg)`, `Error::Crypto(msg)` | `Error::InvalidRequest(InvalidRequestReason::NoPasskey)`, `Error::Conflict(ConflictReason::LastFactor)`, `Error::Config(ConfigReason::..)`, `Error::Crypto(CryptoReason::..)` from `latchkey::error`; `error.detail()` still gives `"no_passkey"` |
+| `SignInEvent::DiscoverablePasskey { .. }` | `SignInEvent::PasskeyOnly { .. }` (same fields) |
+| `.password(params)`, `config.password()` | `.password_params(params)`, `config.password_params()` |
+| `config.origin()`, `config.setup_url()` etc. as `&Url`; `mail.link` as `Url` | `&str`; `mail.link` is a `String` (`Url::parse` it if you need one) |
+| `let mut rng: StdRng = latchkey::os_rng()?` | `let mut rng = latchkey::os_rng()?` (an `impl CryptoRng + Send + Sync`; box it as `Box<dyn CryptoRng + Send>` to store it) |
+| `rp.start_registration(user, name, display, &existing, session, now, rng)` returning a tuple | `rp.start_registration(RegistrationRequest::new(user, name, display, session).excluding(&existing), now, rng)` (or `RegistrationRequest::for_account(&account, session)`) returning `Started { challenge, ceremony }` |
+| `let (challenge, ceremony) = rp.start_authentication(..)?` | `let Started { challenge, ceremony, .. } = rp.start_authentication(..)?` |
+| `let (challenge, ceremony) = rp.start_discoverable(now, rng)?` and `into_state(None, None, now)` | `let SignInStarted { challenge, ceremony, binding_token, .. } = rp.start_discoverable(now, rng)?`; send `binding_token` as the `config.ceremony_cookie_name()` cookie; finish with `ceremony.into_browser_state(cookie_value, now)` |
+| `ceremony.into_state(Some(session), Some(user), now)` | `ceremony.into_state(session, user, now)` |
+| `RelyingParty::from_parts(rp_id, rp_name, &url)` | `RelyingParty::from_parts(rp_id, rp_name, "https://..")` |
+| `TotpSecret::from_bytes(bytes)` | `TotpSecret::from_bytes(bytes)?`: refuses secrets under 16 bytes |
+| `PasswordHash::try_from(phc)` for any PHC string | Argon2id (v=19) only; `PasswordHash::from_legacy_argon2(phc)` for argon2i, argon2d or older versions, then rehash on sign-in (`needs_rehash`) |
+| `latchkey::token::ct_eq`, `flow::invite::optional_name`, `Lockout::after_failure` | gone: `subtle::ConstantTimeEq` (or `TokenHash::verify` / `SecretToken::matches`), the invite flow validates names itself, `Effect::RecordFailure` as an atomic increment |
+| feature `fuzzing` | `_fuzzing` (only for `fuzz/`) |
+| a cookie named `__Host-latchkey_ceremony`, or an app method `password_only` | pick another name: both are latchkey's now |
+
+Stored data is unchanged except passkey ceremonies, which no longer deserialize across the
+upgrade; they live 5 minutes, so drop pending ones when you deploy.
 
 ## Porting from 0.2
 

@@ -31,7 +31,7 @@ default = ["os-rng"]
 # `latchkey::os_rng()`: a ChaCha12 generator seeded from the operating system.
 os-rng = ["dep:rand"]
 # Serialize/Deserialize for the state and record types the app stores.
-serde = ["dep:serde", "time/serde", "uuid/serde", "url/serde"]
+serde = ["dep:serde", "time/serde", "uuid/serde"]
 # Passkeys through webauthn-rs, which links OpenSSL.
 passkeys = ["serde", "dep:webauthn-rs", "dep:serde_json"]
 # `totp::qr_svg`.

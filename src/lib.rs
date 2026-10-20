@@ -64,6 +64,14 @@
 //! | `qr` | no | `totp::qr_svg` |
 //! | `qr-png` | no | `totp::qr_png` (pulls in `image`) |
 //!
+//! # Public dependencies
+//!
+//! Types from these crates appear in the API, so their breaking releases are latchkey's:
+//! [`time`] 0.3 (`OffsetDateTime`, `Duration`), `rand_core` 0.10 ([`CryptoRng`], re-exported
+//! here), [`uuid`] 1 (the id newtypes convert from and to `Uuid`) and, with `passkeys`,
+//! `webauthn-rs` 0.5 (re-exported as `passkey::webauthn_rs`). Other dependencies stay
+//! private: URLs are `&str` and [`os_rng`] returns `impl CryptoRng`.
+//!
 //! # Security
 //!
 //! - Store only hashes of tokens and recovery codes ([`token::TokenHash`],

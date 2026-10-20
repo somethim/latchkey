@@ -15,6 +15,12 @@ app side right is what keeps sign-in secure.
 - Pass a `CryptoRng` (`latchkey::os_rng()?` with the default `os-rng` feature, or another
   CSPRNG). Never a seeded test RNG in production.
 - Build `Config` once with `Config::builder(owner_email, origin).build()?`.
+- Records are `#[non_exhaustive]`: build `Account`, `Session`, `Factors`, `Client`,
+  `CodeMaterial` and the rest with their `new` constructors and assign the other public
+  fields; flow states need a `_` arm when matched.
+- Match errors by reason: `Error::InvalidRequest(InvalidRequestReason::..)`,
+  `Error::Conflict(ConflictReason::..)` from `latchkey::error`; show clients
+  `error.code()` and `error.detail()`.
 - For plain-HTTP development only, `.danger_insecure_localhost_cookies()` drops `__Host-`
   and `Secure`; `build` refuses it unless the origin is `http://localhost`, `127.0.0.1` or
   `[::1]`. Never enable it from a request value or a production config; read cookie names
@@ -79,14 +85,16 @@ app side right is what keeps sign-in secure.
 
 ## Passkeys (feature `passkeys`)
 
-- `start_*` returns the browser challenge and a `Ceremony`. Keep the ceremony server-side
-  under `ceremony.id()`; remove it when the client finishes (single use), then
+- `start_registration(RegistrationRequest::for_account(&account, session.id).excluding(&passkeys), now, rng)`
+  and `start_authentication` return `Started { challenge, ceremony }`. Keep the ceremony
+  server-side under `ceremony.id()`; remove it when the client finishes (single use), then
   `ceremony.into_state(session.id, user, now)?` for registration, second factor and step-up.
 - Passkey sign-in without a session (`start_sign_in` with an allow-list, or
-  `start_discoverable`) also returns a binding token: send it as a cookie named
-  `config.ceremony_cookie_name()` for `CEREMONY_TTL`, and finish with
-  `ceremony.into_browser_state(cookie_value, now)?`. Load the passkeys of
-  `ceremony.binding().user()` for an allow-list sign-in. Never invent a session id for it.
+  `start_discoverable`) returns `SignInStarted { challenge, ceremony, binding_token }`: send
+  `binding_token` as a cookie named `config.ceremony_cookie_name()` for `CEREMONY_TTL`, and
+  finish with `ceremony.into_browser_state(cookie_value, now)?`. Load the passkeys of
+  `ceremony.binding().user()` for an allow-list sign-in, and report the result as
+  `SignInEvent::PasskeyOnly`. Never invent a session id for it.
 - After `finish_authentication` / `finish_discoverable`, call `passkey::record_use` and
   store the updated passkey; `None` means it is not one of the account's passkeys: fail.
 - For discoverable sign-in, load the passkeys of `identify_discoverable(credential)?` and

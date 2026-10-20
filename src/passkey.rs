@@ -45,6 +45,9 @@ use crate::config::Config;
 use crate::ids::{CeremonyId, SessionId, UserId};
 use crate::token::{self, SecretToken, TokenHash};
 
+/// The webauthn-rs this module is built on: use its types (challenges, credentials,
+/// [`Passkey`]) through this re-export so they match. webauthn-rs is a public dependency: a
+/// breaking webauthn-rs release (0.5 to 0.6) is a breaking latchkey release.
 pub use webauthn_rs;
 
 /// How long a ceremony stays valid.
