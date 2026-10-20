@@ -27,5 +27,14 @@ pub use mail::{Mail, MailError, MailKind, Mailer, SignInDetails, TestMailer};
 pub use service::Latchkey;
 pub use store::{Role, SqliteStore, Store};
 
+#[cfg(test)]
+mod proptests;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::routes::parse_bodies as json_bodies;
+}
+
 pub use async_trait::async_trait;
 pub use webauthn_rs;

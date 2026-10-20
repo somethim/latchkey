@@ -819,3 +819,44 @@ async fn audit_list(
     let events = latchkey.store().audit(scope, limit).await?;
     Ok(Json(json!({ "events": events })))
 }
+
+/// Parses `data` as every JSON request body and runs the checks that follow parsing, for the
+/// fuzz target and the property tests.
+#[cfg(any(test, feature = "fuzzing"))]
+pub fn parse_bodies(data: &[u8]) {
+    fn parse<T: serde::de::DeserializeOwned>(data: &[u8]) -> Option<T> {
+        serde_json::from_slice(data).ok()
+    }
+    let now = OffsetDateTime::UNIX_EPOCH;
+    if let Some(body) = parse::<TokenBody>(data) {
+        let _ = crate::crypto::token_hash(&body.token);
+    }
+    if let Some(body) = parse::<PasswordBody>(data) {
+        let _ = crate::password::check_policy(&body.password);
+    }
+    if let Some(body) = parse::<CodeBody>(data) {
+        let _ = totp::looks_like_totp(&body.code);
+        let _ = totp::matched_step(&[0; 20], &body.code, now);
+        let _ = crate::recovery::hash(&body.code);
+    }
+    if let Some(body) = parse::<EmailBody>(data) {
+        let _ = normalize_email(&body.email);
+    }
+    if let Some(body) = parse::<SignInBody>(data) {
+        let _ = normalize_email(&body.email);
+        let _ = body.password.len();
+    }
+    if let Some(body) = parse::<StepUpBody>(data) {
+        let _ = totp::looks_like_totp(&body.code);
+        let _ = body.password.len();
+    }
+    let _ = parse::<AssertionBody>(data);
+    let _ = parse::<RegistrationBody>(data);
+    if let Some(body) = parse::<NameBody>(data) {
+        let _ = optional_name(body.name);
+    }
+    if let Some(body) = parse::<InviteBody>(data) {
+        let _ = normalize_email(&body.email);
+        let _ = optional_name(body.display_name);
+    }
+}

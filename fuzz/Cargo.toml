@@ -1,0 +1,23 @@
+[package]
+name = "latchkey-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+latchkey = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "json_bodies"
+path = "fuzz_targets/json_bodies.rs"
+test = false
+doc = false
+bench = false
+
+# Keeps the fuzz crate out of the library's build and lockfile.
+[workspace]
+members = ["."]
