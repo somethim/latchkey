@@ -4,7 +4,8 @@
 //! the browser and a [`Ceremony`] holding the server-side state; `finish_*` consumes the
 //! state. Store the ceremony (it is `Serialize`) under its [`id`](Ceremony::id), hand the id
 //! to the client, and on finish **remove** it before use: ceremonies are single use. A
-//! ceremony expires after [`CEREMONY_TTL`] and is bound to whoever started it
+//! ceremony expires after [`Config::passkey_ceremony_ttl`] (5 minutes by default; see
+//! [`RelyingParty::ceremony_ttl`]) and is bound to whoever started it
 //! ([`Ceremony::binding`]):
 //!
 //! | Started by | [`Binding`] | Finish with |
@@ -15,7 +16,8 @@
 //! A sign-in has no session yet, so its ceremony is bound to the browser instead: the start
 //! also returns a binding token (a [`SecretToken`]) that the ceremony keeps only the hash
 //! of. Send it as a cookie,
-//! `SetCookie::new(config.ceremony_cookie_name().clone(), &token, CEREMONY_TTL)`, and on
+//! `SetCookie::new(config.ceremony_cookie_name().clone(), &token, config.passkey_ceremony_ttl())`,
+//! and on
 //! finish pass the cookie's value to [`Ceremony::into_browser_state`], so only the browser
 //! that started a sign-in can finish it. For an allow-list sign-in,
 //! [`Binding::user`] names the account whose passkeys to load.
@@ -49,9 +51,6 @@ use crate::token::{self, SecretToken, TokenHash};
 /// [`Passkey`]) through this re-export so they match. webauthn-rs is a public dependency: a
 /// breaking webauthn-rs release (0.5 to 0.6) is a breaking latchkey release.
 pub use webauthn_rs;
-
-/// How long a ceremony stays valid.
-pub const CEREMONY_TTL: Duration = Duration::minutes(5);
 
 /// What a [`Ceremony`] is bound to: the request that finishes it must prove the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -193,7 +192,7 @@ pub struct SignInStarted<S> {
     pub ceremony: Ceremony<S>,
     /// Send it as the cookie named
     /// [`Config::ceremony_cookie_name`](crate::Config::ceremony_cookie_name), for
-    /// [`CEREMONY_TTL`], and pass the cookie's value to [`Ceremony::into_browser_state`].
+    /// [`Config::passkey_ceremony_ttl`](crate::Config::passkey_ceremony_ttl), and pass the cookie's value to [`Ceremony::into_browser_state`].
     pub binding_token: SecretToken,
 }
 
@@ -255,19 +254,26 @@ impl<'a> RegistrationRequest<'a> {
 #[derive(Debug)]
 pub struct RelyingParty {
     webauthn: Webauthn,
+    ceremony_ttl: Duration,
 }
 
 impl RelyingParty {
-    /// From the config's relying party id, name and origin.
+    /// From the config's relying party id, name, origin and
+    /// [`passkey_ceremony_ttl`](Config::passkey_ceremony_ttl).
     ///
     /// # Errors
     ///
     /// [`Error::Config`] when the id does not match the origin.
     pub fn new(config: &Config) -> Result<Self, Error> {
-        Self::from_parts(config.rp_id(), config.rp_name(), config.origin())
+        Ok(
+            Self::from_parts(config.rp_id(), config.rp_name(), config.origin())?
+                .with_ceremony_ttl(config.passkey_ceremony_ttl()),
+        )
     }
 
-    /// From explicit parts.
+    /// From explicit parts, with ceremonies lasting 5 minutes (the default
+    /// [`Config::passkey_ceremony_ttl`]) until
+    /// [`with_ceremony_ttl`](Self::with_ceremony_ttl).
     ///
     /// # Errors
     ///
@@ -277,7 +283,24 @@ impl RelyingParty {
         let webauthn = WebauthnBuilder::new(rp_id, &origin)
             .and_then(|builder| builder.rp_name(rp_name).build())
             .map_err(|_| Error::Config(ConfigReason::RpIdMismatch))?;
-        Ok(Self { webauthn })
+        Ok(Self {
+            webauthn,
+            ceremony_ttl: crate::config::DEFAULT_PASSKEY_CEREMONY_TTL,
+        })
+    }
+
+    /// The same relying party with ceremonies lasting `ttl`.
+    #[must_use]
+    pub fn with_ceremony_ttl(mut self, ttl: Duration) -> Self {
+        self.ceremony_ttl = ttl;
+        self
+    }
+
+    /// How long its ceremonies stay valid: also the lifetime to give the binding cookie of a
+    /// sign-in ([`SignInStarted::binding_token`]).
+    #[must_use]
+    pub fn ceremony_ttl(&self) -> Duration {
+        self.ceremony_ttl
     }
 
     /// Starts registering a passkey, from a setup session or a recent full session
@@ -307,7 +330,13 @@ impl RelyingParty {
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnRegistrationStart))?;
         Ok(Started {
             challenge,
-            ceremony: ceremony(state, Binding::Session { session, user }, now, rng),
+            ceremony: ceremony(
+                state,
+                Binding::Session { session, user },
+                self.ceremony_ttl,
+                now,
+                rng,
+            ),
         })
     }
 
@@ -360,7 +389,13 @@ impl RelyingParty {
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
         Ok(Started {
             challenge,
-            ceremony: ceremony(state, Binding::Session { session, user }, now, rng),
+            ceremony: ceremony(
+                state,
+                Binding::Session { session, user },
+                self.ceremony_ttl,
+                now,
+                rng,
+            ),
         })
     }
 
@@ -409,7 +444,14 @@ impl RelyingParty {
             .webauthn
             .start_passkey_authentication(passkeys)
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnAuthenticationStart))?;
-        Ok(browser_ceremony(challenge, state, Some(user), now, rng))
+        Ok(browser_ceremony(
+            challenge,
+            state,
+            Some(user),
+            self.ceremony_ttl,
+            now,
+            rng,
+        ))
     }
 
     /// Starts a passkey sign-in where the browser offers the user's discoverable passkeys.
@@ -428,7 +470,14 @@ impl RelyingParty {
             .webauthn
             .start_discoverable_authentication()
             .map_err(|_| Error::Crypto(CryptoReason::WebauthnDiscoverableStart))?;
-        Ok(browser_ceremony(challenge, state, None, now, rng))
+        Ok(browser_ceremony(
+            challenge,
+            state,
+            None,
+            self.ceremony_ttl,
+            now,
+            rng,
+        ))
     }
 
     /// The account a discoverable assertion claims, from its user handle. Load that
@@ -481,6 +530,7 @@ pub fn record_use(passkeys: &mut [Passkey], result: &AuthenticationResult) -> Op
 fn ceremony<S, R: CryptoRng + ?Sized>(
     state: S,
     binding: Binding,
+    ttl: Duration,
     now: OffsetDateTime,
     rng: &mut R,
 ) -> Ceremony<S> {
@@ -488,7 +538,7 @@ fn ceremony<S, R: CryptoRng + ?Sized>(
         id: CeremonyId::random(rng),
         state,
         binding,
-        expires_at: now.saturating_add(CEREMONY_TTL),
+        expires_at: now.saturating_add(ttl),
     }
 }
 
@@ -496,6 +546,7 @@ fn browser_ceremony<S, R: CryptoRng + ?Sized>(
     challenge: RequestChallengeResponse,
     state: S,
     user: Option<UserId>,
+    ttl: Duration,
     now: OffsetDateTime,
     rng: &mut R,
 ) -> SignInStarted<S> {
@@ -506,7 +557,7 @@ fn browser_ceremony<S, R: CryptoRng + ?Sized>(
     };
     SignInStarted {
         challenge,
-        ceremony: ceremony(state, binding, now, rng),
+        ceremony: ceremony(state, binding, ttl, now, rng),
         binding_token: issued.token,
     }
 }

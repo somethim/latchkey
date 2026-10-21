@@ -88,7 +88,8 @@ pub struct Mail {
     pub expires_at: Option<OffsetDateTime>,
     /// Set for [`MailKind::NewDevice`].
     pub sign_in: Option<SignInDetails>,
-    /// The 6-digit sign-in code, in [`MailKind::SignInLink`] mails latchkey sends. It only
+    /// The sign-in code ([`Config::email_code_digits`](crate::Config::email_code_digits)
+    /// digits), in [`MailKind::SignInLink`] mails latchkey sends. It only
     /// works on the device that asked for the mail, until `expires_at`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub code: Option<EmailCode>,
@@ -270,7 +271,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = crate::test_rng();
         let binding = crate::token::issue(&mut rng).token;
-        let (code, _) = crate::flow::email_link::issue_code(&binding, &mut rng);
+        let (code, _) = crate::flow::email_link::issue_code(&binding, 6, &mut rng);
         let digits = code.expose_secret().to_owned();
         let mail = Mail::new(
             MailKind::SignInLink,

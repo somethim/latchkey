@@ -5,12 +5,13 @@
 //! cannot be used twice). Formatting (case, spaces, dashes) does not matter.
 //!
 //! ```
-//! use latchkey::recovery;
+//! use latchkey::{Config, recovery};
 //!
 //! # fn main() -> Result<(), latchkey::Error> {
+//! let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
 //! let mut rng = latchkey::os_rng()?;
-//! let issued = recovery::generate(&mut rng);
-//! assert_eq!(issued.codes.len(), recovery::COUNT);
+//! let issued = recovery::generate(config.recovery_code_count(), &mut rng);
+//! assert_eq!(issued.codes.len(), 10);
 //!
 //! let typed = issued.codes[3].expose_secret().to_uppercase().replace('-', " ");
 //! let matched = recovery::verify(&typed, &issued.hashes);
@@ -25,8 +26,10 @@ use zeroize::Zeroize;
 
 use crate::token::{ct_eq, sha256};
 
-/// Codes per [`generate`].
-pub const COUNT: usize = 10;
+/// The default codes per set
+/// ([`ConfigBuilder::recovery_code_count`](crate::ConfigBuilder::recovery_code_count)).
+pub const DEFAULT_COUNT: usize = 10;
+// The code format (12 symbols of 5 bits in three groups) is fixed: stored hashes depend on it.
 const ALPHABET: &[u8; 32] = b"abcdefghjkmnpqrstuvwxyz023456789";
 const GROUPS: usize = 3;
 const GROUP_LEN: usize = 4;
@@ -120,9 +123,11 @@ pub struct RecoveryCodes {
     pub hashes: Vec<RecoveryCodeHash>,
 }
 
-/// Generates [`COUNT`] codes of 60 random bits each.
-pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R) -> RecoveryCodes {
-    let codes: Vec<RecoveryCode> = (0..COUNT).map(|_| one(rng)).collect();
+/// Generates `count` codes of 60 random bits each. Pass
+/// [`Config::recovery_code_count`](crate::Config::recovery_code_count), which the builder
+/// keeps between 4 and 32; this function does not check it.
+pub fn generate<R: CryptoRng + ?Sized>(count: usize, rng: &mut R) -> RecoveryCodes {
+    let codes: Vec<RecoveryCode> = (0..count).map(|_| one(rng)).collect();
     let hashes = codes
         .iter()
         .filter_map(|code| RecoveryCodeHash::of(code.expose_secret()))
@@ -179,7 +184,7 @@ mod tests {
 
     #[test]
     fn issues_ten_distinct_codes_that_hash() {
-        let issued = generate(&mut crate::test_rng());
+        let issued = generate(DEFAULT_COUNT, &mut crate::test_rng());
         assert_eq!(issued.codes.len(), 10);
         assert_eq!(issued.hashes.len(), 10);
         let mut unique: Vec<_> = issued
@@ -196,8 +201,17 @@ mod tests {
     }
 
     #[test]
+    fn issues_as_many_codes_as_asked() {
+        for count in [4, 16, 32] {
+            let issued = generate(count, &mut crate::test_rng());
+            assert_eq!(issued.codes.len(), count);
+            assert_eq!(issued.hashes.len(), count);
+        }
+    }
+
+    #[test]
     fn formatting_does_not_change_the_hash() {
-        let issued = generate(&mut crate::test_rng());
+        let issued = generate(DEFAULT_COUNT, &mut crate::test_rng());
         let code = issued.codes[0].expose_secret();
         let shouted = code.to_uppercase().replace('-', " ");
         assert_eq!(RecoveryCodeHash::of(code), RecoveryCodeHash::of(&shouted));
@@ -205,17 +219,17 @@ mod tests {
 
     #[test]
     fn verify_names_the_matching_hash_only() {
-        let issued = generate(&mut crate::test_rng());
+        let issued = generate(DEFAULT_COUNT, &mut crate::test_rng());
         for (code, hash) in issued.codes.iter().zip(&issued.hashes) {
             assert_eq!(verify(code.expose_secret(), &issued.hashes), Some(*hash));
         }
-        let other = generate(&mut crate::test_rng());
+        let other = generate(DEFAULT_COUNT, &mut crate::test_rng());
         assert_eq!(verify(other.codes[0].expose_secret(), &issued.hashes), None);
     }
 
     #[test]
     fn a_used_code_no_longer_verifies() {
-        let issued = generate(&mut crate::test_rng());
+        let issued = generate(DEFAULT_COUNT, &mut crate::test_rng());
         let code = issued.codes[2].expose_secret();
         let used = verify(code, &issued.hashes);
         let unused: Vec<_> = issued

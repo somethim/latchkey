@@ -5,13 +5,14 @@
 //! time) so a burst of sign-ins cannot exhaust memory.
 //!
 //! ```
-//! use latchkey::password::{PasswordHasher, PasswordParams};
+//! use latchkey::password::{PasswordHasher, PasswordLength, PasswordParams};
 //!
 //! # fn main() -> Result<(), latchkey::Error> {
 //! let mut rng = latchkey::os_rng()?;
 //! # let params = PasswordParams::new(64, 1, 1)?;
 //! let hasher = PasswordHasher::new(params, &mut rng)?;
-//! let stored = hasher.hash_new_password("correct horse battery", &mut rng)?;
+//! let stored =
+//!     hasher.hash_new_password("correct horse battery", PasswordLength::default(), &mut rng)?;
 //! assert!(hasher.verify("correct horse battery", Some(&stored)));
 //! assert!(!hasher.verify("wrong horse battery", Some(&stored)));
 //! // An unknown account still costs a full hash, and never verifies.
@@ -28,11 +29,66 @@ use zeroize::Zeroize;
 
 use crate::Error;
 
-/// The shortest password [`check_policy`] accepts, in characters.
-pub const MIN_LEN: usize = 12;
-/// The longest password [`check_policy`] accepts, in characters.
-pub const MAX_LEN: usize = 1024;
+/// The default shortest new password, in characters
+/// ([`ConfigBuilder::password_min_len`](crate::ConfigBuilder::password_min_len)).
+pub const DEFAULT_MIN_LEN: usize = 12;
+/// The default longest new password, in characters
+/// ([`ConfigBuilder::password_max_len`](crate::ConfigBuilder::password_max_len)).
+pub const DEFAULT_MAX_LEN: usize = 1024;
+/// The bounds of the shortest-password setting.
+const MIN_LEN_BOUNDS: std::ops::RangeInclusive<usize> = 8..=128;
+/// The bounds of the longest-password setting.
+const MAX_LEN_BOUNDS: std::ops::RangeInclusive<usize> = 64..=1024;
+/// Passwords longer than this many bytes are never hashed by [`PasswordHasher::verify`]: four
+/// bytes per character of the longest allowed password, so no permitted password is cut off
+/// and no request can make the server hash megabytes.
+const MAX_VERIFY_BYTES: usize = 4 * *MAX_LEN_BOUNDS.end();
 const SALT_LEN: usize = 16;
+
+/// The length policy for new passwords, in characters, validated on construction. Take it
+/// from [`Config::password_length`](crate::Config::password_length); [`Default`] is 12 to
+/// 1024.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PasswordLength {
+    min: usize,
+    max: usize,
+}
+
+impl PasswordLength {
+    /// `min` (8 to 128) to `max` (64 to 1024) characters, `min` at most `max`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] with [`ConfigReason::PasswordLength`] otherwise.
+    pub fn new(min: usize, max: usize) -> Result<Self, Error> {
+        if MIN_LEN_BOUNDS.contains(&min) && MAX_LEN_BOUNDS.contains(&max) && min <= max {
+            Ok(Self { min, max })
+        } else {
+            Err(Error::Config(ConfigReason::PasswordLength))
+        }
+    }
+
+    /// The shortest accepted, in characters.
+    #[must_use]
+    pub const fn min(self) -> usize {
+        self.min
+    }
+
+    /// The longest accepted, in characters.
+    #[must_use]
+    pub const fn max(self) -> usize {
+        self.max
+    }
+}
+
+impl Default for PasswordLength {
+    fn default() -> Self {
+        Self {
+            min: DEFAULT_MIN_LEN,
+            max: DEFAULT_MAX_LEN,
+        }
+    }
+}
 
 /// Argon2id cost parameters, validated on construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +271,8 @@ impl PasswordHasher {
         hash_with(&self.params, password, rng)
     }
 
-    /// Checks [`check_policy`], then hashes.
+    /// Checks [`check_policy`] against `length`
+    /// ([`Config::password_length`](crate::Config::password_length)), then hashes.
     ///
     /// # Errors
     ///
@@ -224,9 +281,10 @@ impl PasswordHasher {
     pub fn hash_new_password<R: CryptoRng + ?Sized>(
         &self,
         password: &str,
+        length: PasswordLength,
         rng: &mut R,
     ) -> Result<PasswordHash, Error> {
-        check_policy(password)?;
+        check_policy(password, length)?;
         self.hash(password, rng)
     }
 
@@ -284,15 +342,15 @@ impl PasswordHasher {
     ///
     /// With `stored` = `None` (unknown account, or no password set) it still runs a full hash
     /// against the dummy and returns `false`, so timing does not tell known accounts from
-    /// unknown ones. Passwords longer than four times [`MAX_LEN`] bytes are not hashed as
-    /// given: the dummy is checked instead and the answer is `false`. So is a stored hash
+    /// unknown ones. Passwords longer than 4096 bytes (four bytes for each of the 1024
+    /// characters the longest length policy allows) are not hashed as given: the dummy is checked instead and the answer is `false`. So is a stored hash
     /// whose own parameters cost more than 1 GiB, 16 passes or 16 lanes (or the hasher's
     /// parameters, if those are higher): Argon2 verifies with the stored parameters, and an
     /// imported or tampered hash must not tie up the server.
     #[must_use]
     pub fn verify(&self, password: &str, stored: Option<&PasswordHash>) -> bool {
         let argon2 = argon2(self.params.clone());
-        let too_long = password.len() > MAX_LEN * 4;
+        let too_long = password.len() > MAX_VERIFY_BYTES;
         let (candidate, real) = match stored {
             Some(stored) if !too_long && affordable(stored, &self.params) => (stored, true),
             _ => (&self.dummy, false),
@@ -341,25 +399,34 @@ fn hash_with<R: CryptoRng + ?Sized>(
         .map_err(|_| Error::Crypto(CryptoReason::PasswordHashing))
 }
 
-/// The length policy for new passwords: [`MIN_LEN`] to [`MAX_LEN`] characters.
+/// The length policy for new passwords: `length.min()` to `length.max()` characters.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidRequest`] with `password_too_short` or `password_too_long`.
 ///
 /// ```
+/// use latchkey::Config;
 /// use latchkey::password::check_policy;
-/// assert!(check_policy("short").is_err());
-/// assert!(check_policy("twelve chars").is_ok());
+///
+/// let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
+/// assert!(check_policy("short", config.password_length()).is_err());
+/// assert!(check_policy("twelve chars", config.password_length()).is_ok());
+///
+/// let strict = Config::builder("owner@example.com", "https://home.example.com")
+///     .password_min_len(16)
+///     .build()?;
+/// assert!(check_policy("twelve chars", strict.password_length()).is_err());
+/// # Ok::<(), latchkey::Error>(())
 /// ```
-pub fn check_policy(password: &str) -> Result<(), Error> {
+pub fn check_policy(password: &str, length: PasswordLength) -> Result<(), Error> {
     let len = password.chars().count();
-    if len < MIN_LEN {
+    if len < length.min {
         return Err(Error::InvalidRequest(
             InvalidRequestReason::PasswordTooShort,
         ));
     }
-    if len > MAX_LEN {
+    if len > length.max {
         return Err(Error::InvalidRequest(InvalidRequestReason::PasswordTooLong));
     }
     Ok(())
@@ -401,7 +468,7 @@ mod tests {
     fn oversized_passwords_never_verify() -> Result<(), Error> {
         let mut rng = crate::test_rng();
         let hasher = PasswordHasher::new(cheap(), &mut rng)?;
-        let long = "x".repeat(MAX_LEN * 4 + 1);
+        let long = "x".repeat(MAX_VERIFY_BYTES + 1);
         let hash = hasher.hash(&long, &mut rng)?;
         assert!(!hasher.verify(&long, Some(&hash)));
         Ok(())
@@ -531,9 +598,28 @@ mod tests {
     }
 
     #[test]
-    fn length_policy() {
-        assert!(check_policy("short").is_err());
-        assert!(check_policy("twelve chars").is_ok());
-        assert!(check_policy(&"x".repeat(1025)).is_err());
+    fn length_policy() -> Result<(), Error> {
+        let default = PasswordLength::default();
+        assert!(check_policy("short", default).is_err());
+        assert!(check_policy("twelve chars", default).is_ok());
+        assert!(check_policy(&"x".repeat(1024), default).is_ok());
+        assert!(check_policy(&"x".repeat(1025), default).is_err());
+        let custom = PasswordLength::new(8, 64)?;
+        assert!(check_policy("eight ch", custom).is_ok());
+        assert!(check_policy("seven c", custom).is_err());
+        assert!(check_policy(&"x".repeat(65), custom).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn length_bounds() {
+        let refused = Err(Error::Config(ConfigReason::PasswordLength));
+        assert_eq!(PasswordLength::new(7, 1024), refused);
+        assert_eq!(PasswordLength::new(129, 1024), refused);
+        assert_eq!(PasswordLength::new(12, 63), refused);
+        assert_eq!(PasswordLength::new(12, 1025), refused);
+        assert_eq!(PasswordLength::new(100, 64), refused);
+        assert!(PasswordLength::new(8, 64).is_ok());
+        assert!(PasswordLength::new(128, 1024).is_ok());
     }
 }

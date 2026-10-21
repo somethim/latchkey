@@ -14,7 +14,20 @@ app side right is what keeps sign-in secure.
   production). Never cache one `now` across requests.
 - Pass a `CryptoRng` (`latchkey::os_rng()?` with the default `os-rng` feature, or another
   CSPRNG). Never a seeded test RNG in production.
-- Build `Config` once with `Config::builder(owner_email, origin).build()?`.
+- Build `Config` once with `Config::builder(owner_email, origin).build()?`. Every number
+  latchkey applies is a builder setting with a default and bounds that `build()` checks
+  (README "Configuration"): lifetimes, lockout and rate limits, password length
+  (`password_min_len`/`password_max_len`), TOTP (`totp_digits`, `totp_step`, `totp_skew`),
+  email codes (`email_code_digits`, `email_code_attempts`), `recovery_code_count`,
+  `display_name_max_len`. Pass the built values to the primitives that take them:
+  `config.totp_params()` to every `totp::` call and `code_at`,
+  `config.password_length()` to `check_policy` / `hash_new_password`,
+  `config.recovery_code_count()` to `recovery::generate`, `config.email_code_digits()` to
+  `email_link::issue_code`. Never hard-code the defaults.
+- Changing `totp_digits` or `totp_step` breaks every existing TOTP enrolment (latchkey
+  stores nothing per enrolment; a new step also invalidates stored last-used steps): only
+  change them with a plan to have every account enrol again. Show users the `otpauth://`
+  URL or its QR code, which carry non-default digits and period.
 - Records are `#[non_exhaustive]`: build `Account`, `Session`, `Factors`, `Client`,
   `CodeMaterial` and the rest with their `new` constructors and assign the other public
   fields; flow states need a `_` arm when matched.
@@ -57,8 +70,8 @@ app side right is what keeps sign-in secure.
 
 ## Email sign-in (link and code)
 
-- One mail carries a link and a 6-digit code (`mail.code`), both valid `config.link_ttl()`
-  (5 minutes). Neither signs in: both lead to `EmailLink::SecondFactor`; continue with
+- One mail carries a link and a code of `config.email_code_digits()` digits (`mail.code`,
+  6 by default), both valid `config.link_ttl()` (5 minutes by default). Neither signs in: both lead to `EmailLink::SecondFactor`; continue with
   `SignIn::second_factor(session, account)` and `SignInEvent::Code` / `Passkey`. Never
   issue a full session after a link or code yourself.
 - `EmailLinkEvent::Request` takes the presented `config.email_cookie_name()` cookie as
@@ -68,14 +81,14 @@ app side right is what keeps sign-in secure.
   For a guess, count the attempt and read the row in **one** statement
   (`UPDATE email_codes SET attempts = attempts + 1 WHERE binding_hash = ? RETURNING ...`)
   and pass that row as `request` in `EmailLinkEvent::RedeemCode`. Never check first and
-  count later: racing guesses would escape the 5-guess budget.
+  count later: racing guesses would escape the `config.email_code_attempts()` budget.
 - `ConsumeEmailCode { binding_hash, link_hash }` deletes the request and its link in one
   transaction; if either row is already gone, refuse. `DeleteEmailCode { link_hash }` after
   a link, `DeleteEmailSignIn` when a request ends. Purge expired rows.
-- The 6-digit code is safe only while it is bound to the requesting cookie, has the
-  5-guess budget (wrong guesses also feed the lockout), lives minutes and still needs the
-  second factor. Do not lengthen `link_ttl` much, accept codes without the cookie, or store
-  the code itself.
+- Even a 6-digit code is safe only while it is bound to the requesting cookie, has a small
+  guess budget (5 by default; wrong guesses also feed the lockout), lives minutes and still
+  needs the second factor. Do not lengthen `link_ttl` much, accept codes without the
+  cookie, or store the code itself.
 
 ## Sign-in reset
 
@@ -125,7 +138,9 @@ app side right is what keeps sign-in secure.
   `ceremony.into_state(session.id, user, now)?` for registration, second factor and step-up.
 - Passkey sign-in without a session (`start_sign_in` with an allow-list, or
   `start_discoverable`) returns `SignInStarted { challenge, ceremony, binding_token }`: send
-  `binding_token` as a cookie named `config.ceremony_cookie_name()` for `CEREMONY_TTL`, and
+  `binding_token` as a cookie named `config.ceremony_cookie_name()` for
+  `config.passkey_ceremony_ttl()` (build the `RelyingParty` with `RelyingParty::new(&config)`
+  so its ceremonies last as long), and
   finish with `ceremony.into_browser_state(cookie_value, now)?`. Load the passkeys of
   `ceremony.binding().user()` for an allow-list sign-in, and report the result as
   `SignInEvent::PasskeyOnly`. Never invent a session id for it.

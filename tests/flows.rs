@@ -12,7 +12,7 @@ use common::{App, Browser, OWNER, PASSWORD, code_of};
 use latchkey::account::Email;
 use latchkey::audit::AuditKind;
 use latchkey::error::{ConflictReason, InvalidRequestReason};
-use latchkey::flow::email_link::{CODE_ATTEMPTS, EmailLink};
+use latchkey::flow::email_link::EmailLink;
 use latchkey::flow::invite::{Invite, InviteEvent};
 use latchkey::flow::reset::{Reset, ResetEvent};
 use latchkey::flow::setup::Setup;
@@ -227,7 +227,7 @@ fn password_then_totp_signs_in_and_rotates_the_token() {
         Err(Error::Unauthorized)
     );
     app.advance(Duration::seconds(30));
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     let done = app.code_step(&mut laptop, &code).unwrap();
     assert_eq!(signed_in_method(&done), Some(SignInMethod::PasswordTotp));
     let full = app.session_of(&laptop).unwrap();
@@ -245,7 +245,7 @@ fn totp_step_cannot_be_replayed() {
     let mut browser = Browser::default();
     let (secret, _) = app.setup_owner(&mut browser);
     app.advance(Duration::seconds(30));
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     let mut a = Browser::default();
     app.password_step(&mut a, OWNER, PASSWORD).unwrap();
     app.code_step(&mut a, &code).unwrap();
@@ -268,7 +268,7 @@ fn setup_totp_code_cannot_be_reused_for_sign_in() {
         .unwrap();
     app.setup_password(&mut browser, PASSWORD).unwrap();
     let secret = app.enrol_totp(app.owner_id());
-    let enrolment_code = secret.code_at(app.now).unwrap();
+    let enrolment_code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     app.finish_setup(&mut browser).unwrap();
     let mut other = Browser::default();
     app.password_step(&mut other, OWNER, PASSWORD).unwrap();
@@ -434,7 +434,7 @@ fn second_factor_stage_expires() {
     let mut laptop = Browser::default();
     app.password_step(&mut laptop, OWNER, PASSWORD).unwrap();
     app.advance(Duration::minutes(10));
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     assert_eq!(
         app.code_step(&mut laptop, &code).err(),
         Some(Error::Unauthorized)
@@ -612,7 +612,7 @@ fn totp_after_email(
     secret: &latchkey::totp::TotpSecret,
 ) -> Result<SignIn, Error> {
     app.advance(Duration::seconds(30));
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     app.code_step(browser, &code)
 }
 
@@ -790,14 +790,16 @@ fn the_attempt_budget_ends_the_request_and_its_link() {
     let mail = app.mail.last().unwrap().clone();
     let code = mail.code.as_ref().unwrap().expose_secret().to_owned();
     let wrong = if code == "000000" { "000001" } else { "000000" };
-    for attempt in 1..=CODE_ATTEMPTS {
+    let budget = app.config.email_code_attempts();
+    assert_eq!(budget, 5);
+    for attempt in 1..=budget {
         assert_eq!(
             app.redeem_email_code(&mut tv, wrong).err(),
             Some(Error::SignInFailed)
         );
         assert_eq!(
             app.email_codes.len(),
-            usize::from(attempt < CODE_ATTEMPTS),
+            usize::from(attempt < budget),
             "attempt {attempt}"
         );
     }
@@ -832,8 +834,9 @@ fn guesses_that_raced_past_the_budget_are_refused_even_when_right() {
     app.request_email_link(&mut tv, OWNER);
     let code = sign_in_code(&app);
     // Five guesses were counted by concurrent requests before this one was checked.
+    let budget = app.config.email_code_attempts();
     for request in app.email_codes.values_mut() {
-        request.attempts = CODE_ATTEMPTS;
+        request.attempts = budget;
     }
     assert_eq!(
         app.redeem_email_code(&mut tv, &code).err(),
@@ -1112,7 +1115,7 @@ fn sensitive_changes_need_a_step_up_within_five_minutes() {
         session.authorize(true, Access::Recent, window, app.now),
         Err(Error::StepUpRequired)
     );
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     let done = app.step_up_password(&mut browser, PASSWORD, &code).unwrap();
     assert!(matches!(done, StepUp::Done { .. }));
     let session = app.session_of(&browser).unwrap();
@@ -1143,7 +1146,7 @@ fn wrong_step_up_passwords_count_towards_throttle_and_lockout() {
     let mut app = App::new();
     let mut browser = Browser::default();
     let (secret, _) = app.setup_owner(&mut browser);
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     assert_eq!(
         app.step_up_password(&mut browser, "wrong password!!", &code)
             .err(),
@@ -1167,7 +1170,7 @@ fn by_default_a_locked_account_cannot_step_up() {
     for _ in 0..5 {
         let _ = app.password_step(&mut Browser::default(), OWNER, "wrong password!!");
     }
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     assert_eq!(
         app.step_up_password(&mut browser, PASSWORD, &code)
             .err()
@@ -1191,7 +1194,7 @@ fn per_session_wrong_step_ups_end_that_session_and_leave_the_account_alone() {
     let mut app = per_session(5);
     let mut browser = Browser::default();
     let (secret, _) = app.setup_owner(&mut browser);
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     for guess in 1..5 {
         let wrong = if guess % 2 == 0 {
             app.step_up_password(&mut browser, PASSWORD, "000000")
@@ -1244,7 +1247,7 @@ fn per_session_counts_are_kept_apart() {
     let phone_session = app.session_of(&phone).unwrap();
     assert_eq!(phone_session.step_up_failures, 0);
     app.advance(Duration::seconds(30));
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     assert!(app.step_up_password(&mut phone, PASSWORD, &code).is_ok());
 }
 
@@ -1269,7 +1272,7 @@ fn per_session_a_locked_account_can_still_step_up_and_success_clears_both_counts
     }
     assert!(app.throttle.check(&key, app.now).is_err());
 
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     let done = app.step_up_password(&mut browser, PASSWORD, &code);
     assert!(matches!(done, Ok(StepUp::Done { .. })), "{done:?}");
     assert_eq!(app.session_of(&browser).unwrap().step_up_failures, 0);
@@ -1284,7 +1287,7 @@ fn per_session_a_session_already_at_the_limit_is_ended() {
     // Guesses that raced can leave the stored count at the limit with the session alive.
     let hash = app.session_of(&browser).unwrap().token_hash;
     app.sessions.get_mut(&hash).unwrap().step_up_failures = 3;
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     assert_eq!(
         app.step_up_password(&mut browser, PASSWORD, &code).err(),
         Some(Error::SessionEnded)
@@ -1715,7 +1718,13 @@ fn recovery_codes_can_be_regenerated() {
     let mut browser = Browser::default();
     let (_, old) = app.setup_owner(&mut browser);
     let client = app.client(&browser, None);
-    let step = flow::regenerate_recovery_codes(app.owner_id(), &client, app.now, &mut app.rng);
+    let step = flow::regenerate_recovery_codes(
+        &app.config,
+        app.owner_id(),
+        &client,
+        app.now,
+        &mut app.rng,
+    );
     let new = step.state;
     app.apply(step.effects, &mut browser).unwrap();
     let mut laptop = Browser::default();
@@ -1845,7 +1854,7 @@ fn once_a_second_factor_is_enrolled_it_is_required_again() {
     let state = app.password_step(&mut laptop, OWNER, PASSWORD).unwrap();
     assert!(matches!(state, SignIn::SecondFactor { .. }));
     assert_eq!(app.session_of(&laptop).unwrap().stage, Stage::SecondFactor);
-    let code = secret.code_at(app.now).unwrap();
+    let code = secret.code_at(app.now, app.config.totp_params()).unwrap();
     let state = app.code_step(&mut laptop, &code).unwrap();
     assert_eq!(signed_in_method(&state), Some(SignInMethod::PasswordTotp));
 

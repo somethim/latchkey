@@ -134,6 +134,23 @@ reasons!(
         StepUpLimitZero => "step_up_limit_zero", "the step-up failure limit must be at least 1",
         /// Argon2 rejects the parameters.
         Argon2Parameters => "argon2_parameters", "argon2 parameters",
+        /// The password length limits are outside 8 to 128 (shortest) and 64 to 1024
+        /// (longest), or the shortest exceeds the longest.
+        PasswordLength => "password_length", "password length limits out of bounds",
+        /// TOTP digits other than 6 or 8.
+        TotpDigits => "totp_digits", "TOTP digits must be 6 or 8",
+        /// A TOTP step outside 15 to 120 seconds.
+        TotpStep => "totp_step", "the TOTP step must be 15 to 120 seconds",
+        /// A TOTP skew above 3 steps.
+        TotpSkew => "totp_skew", "the TOTP skew must be 0 to 3 steps",
+        /// Email sign-in code digits outside 6 to 10.
+        EmailCodeDigits => "email_code_digits", "email code digits must be 6 to 10",
+        /// Email sign-in code attempts outside 1 to 20.
+        EmailCodeAttempts => "email_code_attempts", "email code attempts must be 1 to 20",
+        /// A recovery code count outside 4 to 32.
+        RecoveryCodeCount => "recovery_code_count", "recovery code count must be 4 to 32",
+        /// A display-name limit outside 1 to 1000 characters.
+        DisplayNameLength => "display_name_length", "display name limit must be 1 to 1000",
         /// The relying party id does not match the origin.
         RpIdMismatch => "rp_id_mismatch", "rp_id does not match the origin",
         /// The data key is all zeroes.

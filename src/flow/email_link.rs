@@ -1,5 +1,6 @@
-//! Email sign-in: one mail carries a single-use link **and** a 6-digit code, both valid for
-//! [`Config::link_ttl`] (5 minutes by default). Either one replaces the password, never the
+//! Email sign-in: one mail carries a single-use link **and** a numeric code
+//! ([`Config::email_code_digits`], 6 by default), both valid for [`Config::link_ttl`] (5
+//! minutes by default). Either one replaces the password, never the
 //! second factor.
 //!
 //! ```text
@@ -18,7 +19,7 @@
 //! [`PasswordOnly::AllowedUntilEnrolled`](crate::PasswordOnly::AllowedUntilEnrolled)) goes
 //! straight to [`EmailLink::SignedIn`].
 //!
-//! # The code, and why 6 digits are enough here
+//! # The code, and why 6 digits (the least allowed) are enough here
 //!
 //! The link carries a 256-bit token and works on any device. The code is for when the link
 //! cannot be opened on the device that asked (a TV, a shared computer, mail read on a
@@ -31,11 +32,15 @@
 //!   token itself, so a code works only together with that cookie: on the screen that asked,
 //!   never on another request, and a copy of the database cannot reverse it.
 //! - **It has a tiny attempt budget.** Each guess is counted before it is checked; the
-//!   [`CODE_ATTEMPTS`]-th wrong guess deletes the request and its link. Wrong guesses also
-//!   count towards the account lockout, like wrong passwords.
-//! - **It lives 5 minutes** (the default [`Config::link_ttl`]; keep it short).
+//!   wrong guess that reaches [`Config::email_code_attempts`] (5 by default, at most 20)
+//!   deletes the request and its link. Wrong guesses also count towards the account
+//!   lockout, like wrong passwords.
+//! - **It lives minutes:** [`Config::link_ttl`], 5 minutes by default; keep it short.
 //! - **It is single use, and so is the link:** redeeming either one deletes both.
 //! - Only its hash is stored ([`EmailCodeHash`]), and it is compared in constant time.
+//!
+//! The odds that guessing wins are attempts / 10^digits per mail: 5 in a million with the
+//! defaults. More digits or fewer attempts lower them.
 //!
 //! An attacker who can make requests for someone's address gets their own binding cookie
 //! and a code mailed to the victim, which they cannot read; each request costs a mail the
@@ -63,18 +68,19 @@
 //!   or another guess won the race).
 //!
 //! ```
-//! use latchkey::flow::email_link::{CODE_ATTEMPTS, issue_code};
-//! use latchkey::token;
+//! use latchkey::flow::email_link::issue_code;
+//! use latchkey::{Config, token};
 //!
 //! # fn main() -> Result<(), latchkey::Error> {
+//! let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
 //! let mut rng = latchkey::os_rng()?;
 //! let binding = token::issue(&mut rng).token; // the requesting device's cookie
-//! let (code, hash) = issue_code(&binding, &mut rng);
+//! let (code, hash) = issue_code(&binding, config.email_code_digits(), &mut rng);
 //! assert_eq!(code.expose_secret().len(), 6);
 //! assert!(hash.verify(binding.expose_secret(), code.expose_secret()));
 //! let other_device = token::issue(&mut rng).token;
 //! assert!(!hash.verify(other_device.expose_secret(), code.expose_secret()));
-//! assert_eq!(CODE_ATTEMPTS, 5);
+//! assert_eq!(config.email_code_attempts(), 5);
 //! # Ok(())
 //! # }
 //! ```
@@ -99,20 +105,21 @@ use crate::mail::{Mail, MailKind};
 use crate::session::{Session, SignInMethod, Stage};
 use crate::token::{self, SecretToken, TokenHash, sha256};
 
-/// Digits in an email sign-in code.
-pub const CODE_DIGITS: usize = 6;
+/// The default digits in an email sign-in code
+/// ([`ConfigBuilder::email_code_digits`](crate::ConfigBuilder::email_code_digits)).
+pub const DEFAULT_CODE_DIGITS: u8 = 6;
 
-/// Guesses a pending code request allows; the guess that reaches it, if wrong, ends the
-/// request and its link.
-pub const CODE_ATTEMPTS: u32 = 5;
+/// The default guesses a pending code request allows
+/// ([`ConfigBuilder::email_code_attempts`](crate::ConfigBuilder::email_code_attempts)).
+pub const DEFAULT_CODE_ATTEMPTS: u32 = 5;
 
-const CODE_SPACE: u32 = 1_000_000;
-// The largest multiple of CODE_SPACE that fits in a u32: draws at or above it are redrawn so
-// every code is equally likely.
-const CODE_ZONE: u32 = u32::MAX - (u32::MAX % CODE_SPACE);
+/// The digits a code may have: [`issue_code`] clamps to them and [`EmailCodeHash::of`]
+/// accepts only them, matching the setting's bounds.
+const MIN_DIGITS: u8 = 6;
+const MAX_DIGITS: u8 = 10;
 const HASH_DOMAIN: &[u8] = b"latchkey-email-code\0";
 
-/// A 6-digit sign-in code to mail once. Its `Debug` output is redacted, it has no
+/// A numeric sign-in code to mail once. Its `Debug` output is redacted, it has no
 /// `Display`, and it is zeroed when dropped.
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -120,7 +127,7 @@ const HASH_DOMAIN: &[u8] = b"latchkey-email-code\0";
 pub struct EmailCode(String);
 
 impl EmailCode {
-    /// The six digits, for the mail.
+    /// The digits, for the mail.
     #[must_use]
     pub fn expose_secret(&self) -> &str {
         &self.0
@@ -141,7 +148,7 @@ impl std::fmt::Debug for EmailCode {
 
 /// What is stored for an [`EmailCode`]: a SHA-256 keyed with the binding token of the request
 /// it belongs to. The binding token is never stored (only its own hash, as the request's
-/// key), so the code cannot be recovered from the database by trying all million values.
+/// key), so the code cannot be recovered from the database by trying every value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
@@ -149,14 +156,15 @@ pub struct EmailCodeHash([u8; 32]);
 
 impl EmailCodeHash {
     /// The hash of `code` for the request bound to `binding`, or `None` when `binding` is not
-    /// a well-formed token or `code` is not six ASCII digits (spaces and dashes are ignored,
-    /// so `123 456` and `123-456` are `123456`).
+    /// a well-formed token or `code` is not 6 to 10 ASCII digits (spaces and dashes are
+    /// ignored, so `123 456` and `123-456` are `123456`). The digits are hashed as typed, so
+    /// a code of another length than the one mailed never matches.
     #[must_use]
     pub fn of(binding: &str, code: &str) -> Option<Self> {
         let binding = binding.trim();
         TokenHash::of(binding)?;
         let mut digits = normalize_code(code)?;
-        let mut input = Vec::with_capacity(HASH_DOMAIN.len() + binding.len() + 1 + CODE_DIGITS);
+        let mut input = Vec::with_capacity(HASH_DOMAIN.len() + binding.len() + 1 + digits.len());
         input.extend_from_slice(HASH_DOMAIN);
         input.extend_from_slice(binding.as_bytes());
         input.push(0);
@@ -218,27 +226,37 @@ fn normalize_code(code: &str) -> Option<String> {
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
         .collect();
-    (digits.len() == CODE_DIGITS && digits.bytes().all(|b| b.is_ascii_digit())).then_some(digits)
+    let shaped = (usize::from(MIN_DIGITS)..=usize::from(MAX_DIGITS)).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit());
+    shaped.then_some(digits)
 }
 
-/// Draws a uniformly random 6-digit code for the request bound to `binding`, and its hash.
+/// Draws a uniformly random code of `digits` digits for the request bound to `binding`, and
+/// its hash. Pass [`Config::email_code_digits`]; `digits` is clamped to 6 to 10, the
+/// setting's bounds.
 ///
 /// The flow calls this itself; it is public for apps that build their own mail, and tests.
 #[must_use]
 pub fn issue_code<R: CryptoRng + ?Sized>(
     binding: &SecretToken,
+    digits: u8,
     rng: &mut R,
 ) -> (EmailCode, EmailCodeHash) {
+    let digits = digits.clamp(MIN_DIGITS, MAX_DIGITS);
+    let space = 10u64.pow(u32::from(digits));
+    // The largest multiple of `space` that fits in a u64: draws at or above it are redrawn so
+    // every code is equally likely.
+    let zone = u64::MAX - (u64::MAX % space);
     let value = loop {
-        let mut bytes = [0u8; 4];
+        let mut bytes = [0u8; 8];
         rng.fill_bytes(&mut bytes);
-        let drawn = u32::from_le_bytes(bytes);
+        let drawn = u64::from_le_bytes(bytes);
         bytes.zeroize();
-        if drawn < CODE_ZONE {
-            break drawn % CODE_SPACE;
+        if drawn < zone {
+            break drawn % space;
         }
     };
-    let code = EmailCode(format!("{value:06}"));
+    let code = EmailCode(format!("{value:0width$}", width = usize::from(digits)));
     // `binding` may be any presented string; an ill-formed one gets a hash nothing matches.
     let hash = EmailCodeHash::of(binding.expose_secret(), code.expose_secret())
         .unwrap_or(EmailCodeHash([0; 32]));
@@ -507,13 +525,14 @@ impl PresentedCode<'_> {
         let Some(account) = account else {
             return Err(Refusal::new(Error::SignInFailed, end()));
         };
-        if request.expires_at <= now || request.attempts > CODE_ATTEMPTS {
+        let budget = config.email_code_attempts();
+        if request.expires_at <= now || request.attempts > budget {
             return Err(Refusal::new(Error::SignInFailed, end()));
         }
         account.lockout.check(now)?;
         if !request.code_hash.verify(binding.expose_secret(), self.code) {
             let mut effects = failure(&account, "email_code", client, now);
-            if request.attempts >= CODE_ATTEMPTS {
+            if request.attempts >= budget {
                 effects.extend(end());
             }
             return Err(Refusal::new(Error::SignInFailed, effects));
@@ -569,7 +588,7 @@ fn send_sign_in_mail<R: CryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Vec<Effect> {
     let issued = issue_link(config, account, LinkKind::SignIn, now, rng);
-    let (code, code_hash) = issue_code(binding, rng);
+    let (code, code_hash) = issue_code(binding, config.email_code_digits(), rng);
     let mut effects = Vec::with_capacity(4);
     if let Some(binding_hash) = binding.hash() {
         effects.push(Effect::StoreEmailCode {
@@ -617,12 +636,35 @@ mod tests {
         let binding = token::issue(&mut rng).token;
         let other = token::issue(&mut rng).token;
         for _ in 0..200 {
-            let (code, hash) = issue_code(&binding, &mut rng);
+            let (code, hash) = issue_code(&binding, DEFAULT_CODE_DIGITS, &mut rng);
             let digits = code.expose_secret();
-            assert_eq!(digits.len(), CODE_DIGITS);
+            assert_eq!(digits.len(), 6);
             assert!(digits.bytes().all(|b| b.is_ascii_digit()));
             assert!(hash.verify(binding.expose_secret(), digits));
             assert!(!hash.verify(other.expose_secret(), digits));
+        }
+    }
+
+    #[test]
+    fn codes_have_the_digits_asked_for_within_the_bounds() {
+        let mut rng = crate::test_rng();
+        let binding = token::issue(&mut rng).token;
+        for (asked, got) in [
+            (6, 6),
+            (8, 8),
+            (10, 10),
+            (0, 6),
+            (4, 6),
+            (12, 10),
+            (255, 10),
+        ] {
+            for _ in 0..50 {
+                let (code, hash) = issue_code(&binding, asked, &mut rng);
+                let digits = code.expose_secret();
+                assert_eq!(digits.len(), got, "asked for {asked}");
+                assert!(digits.bytes().all(|b| b.is_ascii_digit()));
+                assert!(hash.verify(binding.expose_secret(), digits));
+            }
         }
     }
 
@@ -635,7 +677,12 @@ mod tests {
         assert!(hash.verify(b, "123-456"));
         assert!(!hash.verify(b, "123457"));
         assert_eq!(EmailCodeHash::of(b, "12345"), None);
-        assert_eq!(EmailCodeHash::of(b, "1234567"), None);
+        assert_eq!(EmailCodeHash::of(b, "12345678901"), None);
+        // Any length the setting allows hashes, but only to its own value.
+        let eight = EmailCodeHash::of(b, "1234-5678").unwrap();
+        assert!(eight.verify(b, "12345678"));
+        assert!(!eight.verify(b, "123456"));
+        assert!(!hash.verify(b, "12345600"));
         assert_eq!(EmailCodeHash::of(b, "12345a"), None);
         assert_eq!(
             EmailCodeHash::of(b, "\u{661}\u{662}\u{663}\u{664}\u{665}\u{666}"),
@@ -649,7 +696,7 @@ mod tests {
     fn codes_are_redacted_and_hashes_round_trip() {
         let mut rng = crate::test_rng();
         let binding = token::issue(&mut rng).token;
-        let (code, hash) = issue_code(&binding, &mut rng);
+        let (code, hash) = issue_code(&binding, DEFAULT_CODE_DIGITS, &mut rng);
         assert!(!format!("{code:?}").contains(code.expose_secret()));
         let bytes: &[u8] = hash.as_ref();
         assert_eq!(EmailCodeHash::try_from(bytes), Ok(hash));

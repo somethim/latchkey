@@ -126,7 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 account.factors = Factors::new(true, true, 0);
                 account
             },
-            password: hasher.hash_new_password("correct horse battery staple", &mut rng)?,
+            password: hasher.hash_new_password(
+                "correct horse battery staple",
+                config.password_length(),
+                &mut rng,
+            )?,
             sealed_totp: data_key.seal_totp(&mut rng, id, &secret)?,
             last_step: None,
         },
@@ -189,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         Vec::new(),
     );
-    let code = secret.code_at(now)?; // what the authenticator app shows
+    let code = secret.code_at(now, config.totp_params())?; // what the authenticator app shows
     let step = SignIn::second_factor(session, row.account.clone())
         .advance(
             &config,

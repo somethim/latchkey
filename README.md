@@ -10,7 +10,7 @@ returns values; your app stores what it is told to store, sends what it is told 
 answers its clients.
 
 It was extracted from an axum sign-in service (latchkey 0.2) and keeps its behaviour and
-stored formats: Argon2id (64 MiB, t=3, p=2), TOTP (SHA-1, 6 digits, 30 s, ±1 step) with a
+stored formats: Argon2id (64 MiB, t=3, p=2), TOTP (SHA-1; 6 digits, 30 s, ±1 step by default) with a
 replay guard, single-use recovery codes, passkeys with user verification, `__Host-` cookies,
 Origin and CSRF checks, a doubling lockout, a wrong-password throttle, new-device mail and an
 audit trail, now as pure functions and state machines. Since 0.4 an emailed link or code
@@ -20,17 +20,17 @@ stands in for the password only: the second factor is always asked for.
 
 | Module | What it does |
 |---|---|
-| `password` | `PasswordHasher`: Argon2id hash/verify, `needs_rehash` for hashes made with other parameters, `PasswordHash::from_legacy_argon2` for imports, a dummy hash so unknown accounts cost the same, the 12–1024 character policy |
-| `totp` | `TotpSecret` (`from_base32` to import), `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
-| `recovery` | `generate(rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
-| `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; 5 minutes |
+| `password` | `PasswordHasher`: Argon2id hash/verify, `needs_rehash` for hashes made with other parameters, `PasswordHash::from_legacy_argon2` for imports, a dummy hash so unknown accounts cost the same, `check_policy(password, length)` for new passwords |
+| `totp` | `TotpSecret` (`from_base32` to import), `TotpParams` (digits, step, skew), `enrolment` (base32 + `otpauth://` URL), `verify(secret, code, last_used_step, now, params) -> Result<TotpStep, TotpRefusal>`, `qr_svg`/`qr_png` |
+| `recovery` | `generate(count, rng) -> RecoveryCodes { codes, hashes }`, `verify(code, unused_hashes) -> Option<RecoveryCodeHash>` |
+| `passkey` | `RelyingParty` with `start_*`/`finish_*` for registration, authentication, allow-list and discoverable sign-in; `Ceremony<S>` bound (`Ceremony::binding`) to a session and user, or before sign-in to the browser by a one-off token; `Config::passkey_ceremony_ttl` |
 | `token` | `issue(rng) -> IssuedToken { token, hash }`, `TokenHash::of(presented)`, `TokenHash::of_foreign` for tokens another system issued, constant-time compare |
 | `seal` | `DataKey`: AES-256-GCM with associated data per owner and kind, compatible with 0.2's stored values |
 | `http` | `SetCookie` (`__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`; a development mode for plain-HTTP localhost), `find_cookie`, `RequestHeaders::check_origin` / `check_session_request`, `client_ip`, `IpTagKey` |
 | `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
 | `limits` | `RateLimiter` (fixed windows), `WrongPasswordThrottle` (sliding window), and their per-key states |
 | `session` | `Session` records (with their step-up failure count), `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
-| `flow` | `sign_in`, `email_link` (link and 6-digit code), `setup`, `invite`, `reset` (the owner resets a member's sign-in), `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
+| `flow` | `sign_in`, `email_link` (link and numeric code), `setup`, `invite`, `reset` (the owner resets a member's sign-in), `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
 | `mail` | `Mail` with `subject()` and `text()` for setup, sign-in link and code, invite, sign-in reset and new-device mail |
 | `audit` | `AuditEvent` and `AuditKind` |
 
@@ -61,6 +61,93 @@ breaking release of latchkey:
 
 Everything else (`url`, `rand`, `argon2`, `totp-rs`, `aes-gcm` and the rest) stays private:
 URLs are `&str`, `os_rng()` returns `impl CryptoRng`.
+
+## Configuration
+
+latchkey provides the mechanisms; your app chooses the numbers. Every one of them is a
+`Config::builder(owner_email, origin)` setting with a default, and `build()` refuses values
+outside the bounds below (`Error::Config` with a `ConfigReason` naming the setting). Read
+them back from the built `Config` (`config.link_ttl()`, `config.totp_params()`, ...) and pass
+them to the primitives that take them; the flows read them themselves.
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `rp_id` | the origin's host | must match the origin (checked by `RelyingParty::new`) |
+| `rp_name` | the relying party id | any |
+| `owner_name` | the owner's address | any |
+| `cookie_name` | `__Host-latchkey` | `__Host-` prefix, valid cookie name, all four cookie names distinct |
+| `device_cookie_name` | `__Host-latchkey_device` | as above |
+| `ceremony_cookie_name` | `__Host-latchkey_ceremony` | as above |
+| `email_cookie_name` | `__Host-latchkey_email` | as above |
+| `setup_path` | `/setup` | must join onto the origin |
+| `sign_in_link_path` | `/sign-in/link` | as above |
+| `invite_path` | `/invite` | as above |
+| `sessions_path` | `/settings/sessions` | as above |
+| `device_ttl` | 400 days | any `Duration` |
+| `session_ttl` | 30 days | any `Duration` |
+| `pending_ttl` (second-factor sessions) | 10 minutes | any `Duration` |
+| `setup_ttl` (setup sessions) | 1 hour | any `Duration` |
+| `link_ttl` (email sign-in links and codes) | 5 minutes | any `Duration`; keep it short |
+| `setup_link_ttl` (owner setup links) | 1 hour | any `Duration` |
+| `invite_ttl` (invite and reset links) | 24 hours | any `Duration` |
+| `resend_cooldown` | 1 minute | any `Duration` |
+| `step_up_window` | 5 minutes | any `Duration` |
+| `passkey_ceremony_ttl` | 5 minutes | any `Duration` |
+| `lockout` (`LockoutPolicy::new(threshold, base, max)`) | 5 failures lock 5 minutes, doubling to 1 hour | threshold 0 turns it off |
+| `step_up_failures` | `StepUpFailures::AccountLockout` | `PerSession { limit }` with `limit` ≥ 1 |
+| `password_only` | `PasswordOnly::Refused` | |
+| `rate_limits` (`RateLimits::new(per_ip, per_account, wrong_passwords, window)`) | 30 per IP and 10 per account per minute; 10 wrong passwords per 15 minutes | wrong passwords 0 turns the throttle off |
+| `password_params` (`PasswordParams::new(memory_kib, t, p)`) | 64 MiB, t=3, p=2 | what Argon2 accepts |
+| `password_min_len` (characters) | 12 | 8 to 128, at most `password_max_len` |
+| `password_max_len` (characters) | 1024 | 64 to 1024 |
+| `totp_digits` | 6 | 6 or 8 |
+| `totp_step` (seconds) | 30 | 15 to 120 |
+| `totp_skew` (steps either way) | 1 | 0 to 3 |
+| `email_code_digits` | 6 | 6 to 10 |
+| `email_code_attempts` | 5 | 1 to 20 |
+| `recovery_code_count` | 10 | 4 to 32 |
+| `display_name_max_len` (characters, invites) | 100 | 1 to 1000 |
+| `danger_insecure_localhost_cookies()` | off | plain-HTTP localhost origins only |
+
+```rust
+use latchkey::Config;
+use time::Duration;
+
+let config = Config::builder("owner@example.com", "https://home.example.com")
+    .link_ttl(Duration::minutes(2))
+    .email_code_digits(8)
+    .email_code_attempts(3)
+    .recovery_code_count(16)
+    .build()?;
+assert_eq!(config.email_code_digits(), 8);
+assert!(Config::builder("owner@example.com", "https://home.example.com")
+    .email_code_attempts(0)
+    .build()
+    .is_err());
+# Ok::<(), latchkey::Error>(())
+```
+
+**TOTP digits and step are part of every enrolment.** Authenticator apps store them with the
+secret, and latchkey stores nothing per enrolment: an account enrolled under one setting
+keeps working only while the setting stays the same. Change `totp_digits` or `totp_step` and
+every account must enrol TOTP again (for the step, also clear its stored last-used step,
+which counts steps of the old length). `totp::enrolment` puts `digits` and `period` in the
+`otpauth://` URL, and so in its QR code, whenever they differ from 6 and 30; if you show only
+the base32 secret, tell users the values. `totp_skew` can change at any time.
+
+The other settings change only what happens next: new passwords, new codes, new mails, new
+sessions. Pending email codes of another length stop matching, recovery-code sets keep their
+size until regenerated, and stored passwords keep verifying.
+
+Constants that stay are formats and security floors, not preferences:
+`token::TOKEN_BYTES` (256-bit tokens, how latchkey recognises its own),
+`token::FOREIGN_MIN_LEN`/`FOREIGN_MAX_LEN` (the shape of imported tokens: at least 128 bits),
+`totp::SECRET_BYTES` (160-bit secrets, RFC 4226's recommendation) and `MIN_SECRET_BYTES`
+(128 bits, its floor), `http::CSRF_HEADER` (a wire name) and `http::MAX_USER_AGENT` (what
+`truncate_user_agent` keeps; `Client::user_agent` is yours to shorten differently), plus the
+recovery-code format and the hash and seal layouts that stored values depend on. The
+`DEFAULT_*` constants (`email_link::DEFAULT_CODE_DIGITS`, `totp::DEFAULT_STEP_SECS`, ...) are
+the settings' defaults.
 
 ## How the flows work
 
@@ -171,7 +258,7 @@ mod passkey_sign_in {
     use latchkey::passkey::webauthn_rs::prelude::{
         AuthenticationResult, Passkey, PasskeyAuthentication, PublicKeyCredential,
     };
-    use latchkey::passkey::{CEREMONY_TTL, Ceremony, RelyingParty, SignInStarted};
+    use latchkey::passkey::{Ceremony, RelyingParty, SignInStarted};
     use latchkey::{Config, CryptoRng, Error, UserId};
     use time::OffsetDateTime;
 
@@ -187,7 +274,8 @@ mod passkey_sign_in {
     ) -> Result<(SignInStarted<PasskeyAuthentication>, SetCookie), Error> {
         let started = rp.start_sign_in(user, passkeys, now, rng)?;
         let name = config.ceremony_cookie_name().clone();
-        let cookie = SetCookie::new(name, &started.binding_token, CEREMONY_TTL);
+        // As long as the ceremony: config.passkey_ceremony_ttl(), via RelyingParty::new.
+        let cookie = SetCookie::new(name, &started.binding_token, rp.ceremony_ttl());
         Ok((started, cookie))
     }
 
@@ -215,8 +303,9 @@ Only the browser holding the cookie can finish the ceremony it started.
 
 ### Email sign-in: a link and a code
 
-`EmailLinkEvent::Request` mails one message with a single-use link and a 6-digit code, both
-valid for `config.link_ttl()` (5 minutes). The link works on any device; the code only on
+`EmailLinkEvent::Request` mails one message with a single-use link and a code of
+`config.email_code_digits()` digits (6 by default), both valid for `config.link_ttl()` (5
+minutes by default). The link works on any device; the code only on
 the device that asked, which gets a binding cookie (`config.email_cookie_name()`) whether or
 not the address exists. Redeeming either one deletes both, and neither signs in on its own:
 they replace the password, and the flow continues to the second factor exactly as after a
@@ -224,9 +313,10 @@ password (`EmailLink::SecondFactor`, then `SignIn::second_factor(session, accoun
 `SignInEvent::Code` or `Passkey`).
 
 A 6-digit code is only safe because it is bound to one pending request (its hash is keyed
-with the binding cookie, which is never stored), allows 5 guesses (each counted **before** it
-is checked, and also towards the account lockout), lives 5 minutes, and still needs the
-second factor. Keep all four.
+with the binding cookie, which is never stored), allows few guesses
+(`config.email_code_attempts()`, 5 by default, each counted **before** it is checked, and
+also towards the account lockout), lives minutes (`link_ttl`), and still needs the second
+factor. Keep all four; the settings let you make the code longer and the budget smaller.
 
 ```rust
 use latchkey::flow::email_link::{EmailCodeRequest, EmailLink, EmailLinkEvent};
@@ -497,6 +587,13 @@ code, and links and invites live shorter. Apps on 0.3.0 change these lines:
 | full sessions with method `email_link` | still parse; new sign-ins record `email+totp`, `email+recovery_code` or `email+passkey`, and second-factor sessions `email_link` or `email_code` |
 | an app method or cookie named `email_code` or `__Host-latchkey_email` | pick another name: both are latchkey's now |
 | a `match` on `Effect`, `MailKind`, `AuditKind` or `SignInMethod` | handle the new variants (they are `#[non_exhaustive]`, so a `_` arm compiles, but the new effects must be carried out) |
+| `totp::verify(secret, code, last, now)`, `totp::enrolment(secret, issuer, account)`, `totp::looks_like_code(code)`, `secret.code_at(now)` | add `config.totp_params()` as the last argument |
+| `totp::DIGITS`, `STEP_SECS`, `SKEW` | `config.totp_params()` (`digits()`, `step_secs()`, `skew()`); the defaults are `totp::DEFAULT_DIGITS`, `DEFAULT_STEP_SECS`, `DEFAULT_SKEW` (now a `u8`) |
+| `recovery::generate(rng)`, `recovery::COUNT` | `recovery::generate(config.recovery_code_count(), rng)`; `recovery::DEFAULT_COUNT` |
+| `password::check_policy(pw)`, `hasher.hash_new_password(pw, rng)`, `password::MIN_LEN` / `MAX_LEN` | `check_policy(pw, config.password_length())`, `hash_new_password(pw, config.password_length(), rng)`; `password::DEFAULT_MIN_LEN` / `DEFAULT_MAX_LEN` |
+| `passkey::CEREMONY_TTL` | `config.passkey_ceremony_ttl()`, or `rp.ceremony_ttl()` on a `RelyingParty` built with `RelyingParty::new(&config)` (`from_parts` uses 5 minutes; `with_ceremony_ttl` changes it) |
+| `flow::check_code(code, material, now)`, `flow::regenerate_recovery_codes(user, client, now, rng)` | add `&config` as the first argument |
+| `flow::invite::MAX_NAME_LEN` | `config.display_name_max_len()`; `invite::DEFAULT_MAX_NAME_LEN` |
 
 Stored data is unchanged; rows written by 0.3.0 keep working.
 
@@ -569,7 +666,7 @@ Endpoints to flow calls:
 | `POST /step-up/password`, `/step-up/passkey/*` | `StepUp`: `Password` + `PasswordChecked`, `Passkey` |
 | `POST /sign-out` | `flow::sign_out` |
 | `POST /password`, `/recovery-codes` | `flow::password_changed`, `flow::regenerate_recovery_codes` (after `Access::Recent`) |
-| `POST /totp/enrol`, `/totp/confirm`, `DELETE /totp` | `TotpSecret::random` + `totp::enrolment` + `DataKey::seal_totp`; `totp::verify(pending, code, None, now)`; `Factors::may_remove_totp` (after `Access::Enrolling`/`Recent`) |
+| `POST /totp/enrol`, `/totp/confirm`, `DELETE /totp` | `TotpSecret::random` + `totp::enrolment` + `DataKey::seal_totp`; `totp::verify(pending, code, None, now, config.totp_params())`; `Factors::may_remove_totp` (after `Access::Enrolling`/`Recent`) |
 | `/passkeys/register/*`, `DELETE /passkeys/{id}` | `RelyingParty::start_registration`/`finish_registration`; `Factors::may_remove_passkey` |
 | `GET /me`, `/sessions`, `DELETE /sessions/{id}`, `GET /audit` | Your queries; `Session::step_up_until` for `step_up_until` |
 
@@ -588,15 +685,17 @@ user handle differs; the device cookie is still set on every completed sign-in.
   presented secrets are constant-time.
 - A TOTP step is accepted once (`last_used_step`); recovery codes, links, email codes and
   passkey ceremonies are single use; an emailed link or code replaces only the password,
-  never the second factor. An email code is 6 digits, so it is bound to the requesting
-  device's cookie (its hash is keyed with it), allows 5 counted guesses (which also count
-  towards the lockout), and lives 5 minutes; using the link or the code deletes both; passkey ceremonies are bound to the session and account that
-  started them (a sign-in, which has no session yet, to the browser by a one-off cookie) and
-  expire after 5 minutes; counter regressions are rejected by webauthn-rs.
+  never the second factor. An email code has 6 to 10 digits (6 by default), so it is bound
+  to the requesting device's cookie (its hash is keyed with it), allows 1 to 20 counted
+  guesses (5 by default; they also count towards the lockout), and lives `link_ttl` (5
+  minutes by default); using the link or the code deletes both; passkey ceremonies are
+  bound to the session and account that started them (a sign-in, which has no session yet,
+  to the browser by a one-off cookie) and expire after `passkey_ceremony_ttl` (5 minutes by
+  default); counter regressions are rejected by webauthn-rs.
 - Every stage change issues a new session token (`StoreSession { replaces }`).
-- The wrong-password throttle (10 per 15 minutes per address) counts unknown addresses too and
-  is checked before hashing; the lockout (5 failures: 5 minutes, doubling to an hour) is
-  per account. Step-up guesses count towards both unless `Config::step_up_failures` is
+- The wrong-password throttle (by default 10 per 15 minutes per address) counts unknown
+  addresses too and is checked before hashing; the lockout (by default 5 failures: 5
+  minutes, doubling to an hour) is per account. Step-up guesses count towards both unless `Config::step_up_failures` is
   `PerSession { limit }`, which bounds each session to `limit` wrong guesses and then ends it.
 - Sealed values use a random 96-bit nonce and associated data `latchkey-totp:<user>` or
   `latchkey-passkey:<user>:<passkey>`; `Aad::app(context)` is for the app's own secrets.

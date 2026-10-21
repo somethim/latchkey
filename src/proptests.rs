@@ -12,7 +12,7 @@ use crate::ids::UserId;
 use crate::limits::{FailureWindow, FixedWindow, RateLimiter};
 use crate::seal::{Aad, DataKey};
 use crate::token::{self, TOKEN_BYTES, TokenHash, sha256};
-use crate::totp::{self, TotpSecret, TotpStep};
+use crate::totp::{self, TotpParams, TotpSecret, TotpStep};
 
 const START: i64 = 1_800_000_000;
 
@@ -199,10 +199,10 @@ proptest! {
         let secret = TotpSecret::random(&mut crate::test_rng());
         let now = at(offset);
         let code_time = now - Duration::seconds(back * 30);
-        let code = secret.code_at(code_time).unwrap();
+        let code = secret.code_at(code_time, TotpParams::default()).unwrap();
         let current = u64::try_from(now.unix_timestamp() / 30).unwrap();
         let last = TotpStep::new(current.saturating_add_signed(last_delta));
-        if let Ok(step) = totp::verify(&secret, &code, Some(last), now) {
+        if let Ok(step) = totp::verify(&secret, &code, Some(last), now, TotpParams::default()) {
             prop_assert!(step > last);
         }
     }
@@ -246,14 +246,14 @@ proptest! {
     fn untrusted_text_never_panics_the_parsers(text in ".{0,300}") {
         let _ = crate::recovery::RecoveryCodeHash::of(&text);
         let _ = crate::account::Email::parse(&text);
-        let _ = crate::password::check_policy(&text);
+        let _ = crate::password::check_policy(&text, crate::password::PasswordLength::default());
         let _ = crate::http::client_ip(None, [text.as_str()], true);
         let _ = text.parse::<crate::session::SignInMethod>();
         let _ = EmailCodeHash::of(&text, &text);
-        let _ = crate::flow::invite::optional_name(Some(text.clone()));
+        let _ = crate::flow::invite::optional_name(Some(text.clone()), 100);
         let _ = crate::password::PasswordHash::try_from(text.as_str());
         let secret = TotpSecret::random(&mut crate::test_rng());
-        let _ = totp::verify(&secret, &text, None, at(0));
+        let _ = totp::verify(&secret, &text, None, at(0), TotpParams::default());
     }
 
     #[test]
@@ -266,7 +266,7 @@ proptest! {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let binding = token::issue(&mut rng).token;
         let other = token::issue(&mut rng).token;
-        let (code, hash) = issue_code(&binding, &mut rng);
+        let (code, hash) = issue_code(&binding, 6, &mut rng);
         let digits = code.expose_secret();
         prop_assert_eq!(digits.len(), 6);
         prop_assert!(digits.bytes().all(|b| b.is_ascii_digit()));

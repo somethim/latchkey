@@ -12,7 +12,9 @@ SQLite database keeps working with the app's own queries.
 ## Steps
 
 1. Replace `Config::new(owner, origin, secret_key, data_key)` with
-   `Config::builder(owner, origin).build()?`, `DataKey::new(&data_key)` and
+   `Config::builder(owner, origin).build()?` (its defaults are 0.2's values: 6-digit
+   30-second TOTP, 10 recovery codes, 12 to 1024 character passwords; keep the TOTP ones,
+   or 0.2 TOTP enrolments stop working), `DataKey::new(&data_key)` and
    `IpTagKey::new(&secret_key)`; keep the keys where they were. Call
    `seal::check_keys(&secret_key, &data_key)?` at start.
 2. Create a `PasswordHasher::new(config.password_params(), &mut rng)?` once; run `verify` and
@@ -40,8 +42,9 @@ SQLite database keeps working with the app's own queries.
    `RequestHeaders::check_session_request`.
 7. Hold one `RateLimiter` per IP and per account, and one `WrongPasswordThrottle`, in app
    state behind a `Mutex`; check the limiters before calling a flow.
-8. Store passkey ceremonies (`passkey::Ceremony`, `Serialize`) in a table or cache with a
-   5-minute TTL and remove them on use.
+8. Store passkey ceremonies (`passkey::Ceremony`, `Serialize`) in a table or cache that
+   expires them after `config.passkey_ceremony_ttl()` (5 minutes by default) and remove
+   them on use.
 9. Replace `Latchkey::issue_session(user, IssueSession::from_headers(...))` with
    `flow::issue_session(&config, &account, AppMethod::new("...")?, &client, now, &mut rng)`.
 10. Replace `ManualClock` in tests with explicit `now` values and `TestMailer` with the
@@ -76,7 +79,13 @@ takes `binding` (the `config.email_cookie_name()` cookie) and `Redeem` takes `to
 pending email codes need a table and the `StoreEmailCode` / `ConsumeEmailCode` /
 `DeleteEmailCode` / `DeleteEmailSignIn` effects, `link_ttl` (sign-in links and codes) is 5
 minutes, the new `setup_link_ttl` (owner setup links) 1 hour and `invite_ttl` 24 hours by
-default, and `flow::reset` adds the owner's "Reset sign-in".
+default, and `flow::reset` adds the owner's "Reset sign-in". The former constants are
+settings now (`Config::totp_params`, `password_length`, `recovery_code_count`,
+`email_code_digits`, `email_code_attempts`, `passkey_ceremony_ttl`, `display_name_max_len`):
+`totp::verify` / `enrolment` / `looks_like_code` / `code_at` take `config.totp_params()` last,
+`recovery::generate` takes the count, `check_policy` and `hash_new_password` take
+`config.password_length()`, and `flow::check_code` and `flow::regenerate_recovery_codes`
+take `&config` first. The old names are gone; `DEFAULT_*` constants hold the defaults.
 
 ## From a 0.3.0-dev build
 

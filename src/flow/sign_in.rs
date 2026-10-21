@@ -231,7 +231,7 @@ impl SignIn {
                 },
             ) => {
                 second_factor_allowed(config, &account, &session, now)?;
-                let Some(matched) = check_code(&code, &material, now) else {
+                let Some(matched) = check_code(config, &code, &material, now) else {
                     let effects = failure(&account, "code", &client, now);
                     return Err(Refusal::new(Error::SignInFailed, effects));
                 };

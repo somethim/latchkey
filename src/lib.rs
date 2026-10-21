@@ -187,18 +187,24 @@ pub mod fuzzing {
         );
         let _ = crate::recovery::RecoveryCodeHash::of(&text);
         if let Ok(secret) = crate::totp::TotpSecret::from_bytes(vec![0; 20]) {
-            let _ = crate::totp::verify(&secret, &text, None, now);
+            let _ = crate::totp::verify(
+                &secret,
+                &text,
+                None,
+                now,
+                crate::totp::TotpParams::default(),
+            );
         }
         let _ = crate::totp::TotpSecret::from_base32(&text);
         let _ = crate::password::PasswordHash::from_legacy_argon2(&text);
         let _ = crate::account::Email::parse(&text);
         let _ = crate::account::AccountKey::from_login(&text);
-        let _ = crate::password::check_policy(&text);
+        let _ = crate::password::check_policy(&text, crate::password::PasswordLength::default());
         let _ = crate::http::find_cookie([text.as_ref()], "__Host-latchkey");
         let _ = crate::http::client_ip(None, [text.as_ref()], true);
         let _ = crate::http::CookieName::new(&text);
         let _ = text.parse::<crate::session::SignInMethod>();
-        let _ = crate::flow::invite::optional_name(Some(text.to_string()));
+        let _ = crate::flow::invite::optional_name(Some(text.to_string()), 100);
         let key = crate::seal::DataKey::new(&[3; 32]);
         let aad = crate::seal::Aad::app("fuzz");
         let _ = key.open_bytes(&aad, data);

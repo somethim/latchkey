@@ -217,7 +217,7 @@ impl Setup {
                         Error::InvalidRequest(InvalidRequestReason::SecondFactorRequired).into(),
                     );
                 }
-                let issued = recovery::generate(rng);
+                let issued = recovery::generate(config.recovery_code_count(), rng);
                 let mut effects = vec![
                     Effect::ActivateAccount {
                         user_id: account.id,

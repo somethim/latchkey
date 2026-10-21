@@ -29,9 +29,12 @@ use zeroize::Zeroize;
 use crate::Error;
 use crate::token::{SecretToken, ct_eq};
 
-/// The request header that carries the CSRF token on unsafe requests.
+/// The request header that carries the CSRF token on unsafe requests. Fixed: a wire name
+/// clients send, not a policy.
 pub const CSRF_HEADER: &str = "x-csrf-token";
-/// User agents are cut to this many characters before they are stored.
+/// What [`truncate_user_agent`] cuts a user agent to, in characters. Fixed for the helper:
+/// [`Client::user_agent`](crate::flow::Client::user_agent) is the app's own value, so an app
+/// that wants another length shortens it itself.
 pub const MAX_USER_AGENT: usize = 256;
 
 /// A cookie name with the `__Host-` prefix, which makes browsers keep the cookie host-only,

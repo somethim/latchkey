@@ -465,7 +465,11 @@ impl App {
 
     pub fn setup_password(&mut self, browser: &mut Browser, password: &str) -> Result<(), Error> {
         let state = self.setup_state(browser)?;
-        let hash = self.hasher.hash_new_password(password, &mut self.rng)?;
+        let hash = self.hasher.hash_new_password(
+            password,
+            self.config.password_length(),
+            &mut self.rng,
+        )?;
         let client = self.client(browser, None);
         match state.advance(
             &self.config,
@@ -481,8 +485,8 @@ impl App {
     /// Enrols TOTP directly (as the app would after `totp::verify` of the first code).
     pub fn enrol_totp(&mut self, user: UserId) -> TotpSecret {
         let secret = TotpSecret::random(&mut self.rng);
-        let code = secret.code_at(self.now).unwrap();
-        let step = totp::verify(&secret, &code, None, self.now).unwrap();
+        let code = secret.code_at(self.now, self.config.totp_params()).unwrap();
+        let step = totp::verify(&secret, &code, None, self.now, self.config.totp_params()).unwrap();
         let sealed = self
             .data_key
             .seal_totp(&mut self.rng, user, &secret)
@@ -610,7 +614,7 @@ impl App {
         secret: &TotpSecret,
     ) -> Result<SignIn, Error> {
         self.password_step(browser, email, password)?;
-        let code = secret.code_at(self.now).unwrap();
+        let code = secret.code_at(self.now, self.config.totp_params()).unwrap();
         self.code_step(browser, &code)
     }
 

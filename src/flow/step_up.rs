@@ -213,7 +213,7 @@ impl StepUp {
                     }];
                     return Ok(stepped_up(config, &account, session, &client, now, effects));
                 }
-                let Some(matched) = check_code(&code, &material, now) else {
+                let Some(matched) = check_code(config, &code, &material, now) else {
                     return Err(wrong_guess(
                         config,
                         &account,

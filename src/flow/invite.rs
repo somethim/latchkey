@@ -16,8 +16,9 @@ use crate::config::Config;
 use crate::ids::UserId;
 use crate::session::{Access, Session};
 
-/// Longest display name, in characters.
-pub const MAX_NAME_LEN: usize = 100;
+/// The default longest display name, in characters
+/// ([`ConfigBuilder::display_name_max_len`](crate::ConfigBuilder::display_name_max_len)).
+pub const DEFAULT_MAX_NAME_LEN: usize = 100;
 
 /// Where an invite is.
 // States are moved once per request; boxing the large variants would only complicate
@@ -92,7 +93,8 @@ impl Invite {
         if inviter.role != Role::Owner {
             return Err(Error::Forbidden.into());
         }
-        let display_name = optional_name(display_name)?.unwrap_or_else(|| email.to_string());
+        let display_name = optional_name(display_name, config.display_name_max_len())?
+            .unwrap_or_else(|| email.to_string());
         if email_taken {
             return Err(Error::Conflict(ConflictReason::EmailTaken).into());
         }
@@ -124,10 +126,10 @@ impl Invite {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidRequest`] with `name_too_long` beyond [`MAX_NAME_LEN`] characters.
-pub(crate) fn optional_name(raw: Option<String>) -> Result<Option<String>, Error> {
+/// [`Error::InvalidRequest`] with `name_too_long` beyond `max_len` characters.
+pub(crate) fn optional_name(raw: Option<String>, max_len: usize) -> Result<Option<String>, Error> {
     match raw.map(|name| name.trim().to_owned()) {
-        Some(name) if name.chars().count() > MAX_NAME_LEN => {
+        Some(name) if name.chars().count() > max_len => {
             Err(Error::InvalidRequest(InvalidRequestReason::NameTooLong))
         }
         Some(name) if name.is_empty() => Ok(None),

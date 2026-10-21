@@ -29,11 +29,14 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-/// Random bytes in a token.
+/// Random bytes in a token. Fixed: 256 bits is a security floor, and [`TokenHash::of`]
+/// recognises latchkey's tokens by this length.
 pub const TOKEN_BYTES: usize = 32;
 /// The shortest token [`TokenHash::of_foreign`] accepts, in bytes: 128 bits in base64.
+/// Fixed: a security floor for tokens imported from another system.
 pub const FOREIGN_MIN_LEN: usize = 22;
-/// The longest token [`TokenHash::of_foreign`] accepts, in bytes.
+/// The longest token [`TokenHash::of_foreign`] accepts, in bytes. Fixed: a format bound
+/// that keeps hashing presented values cheap.
 pub const FOREIGN_MAX_LEN: usize = 512;
 
 /// The SHA-256 of a token: what the app stores and looks tokens up by.

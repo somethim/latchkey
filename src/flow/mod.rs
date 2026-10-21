@@ -211,13 +211,20 @@ pub enum CodeMatch {
     RecoveryCode(RecoveryCodeHash),
 }
 
-/// Checks a code typed into a single "code" field: six digits are a TOTP code (accepted only
-/// for a step newer than the last used one), anything else a recovery code.
+/// Checks a code typed into a single "code" field: [`Config::totp_params`]'s number of
+/// digits is a TOTP code (accepted only for a step newer than the last used one), anything
+/// else a recovery code.
 #[must_use]
-pub fn check_code(code: &str, material: &CodeMaterial, now: OffsetDateTime) -> Option<CodeMatch> {
-    if totp::looks_like_code(code) {
+pub fn check_code(
+    config: &Config,
+    code: &str,
+    material: &CodeMaterial,
+    now: OffsetDateTime,
+) -> Option<CodeMatch> {
+    let params = config.totp_params();
+    if totp::looks_like_code(code, params) {
         let totp = material.totp.as_ref()?;
-        return totp::verify(&totp.secret, code, totp.last_used_step, now)
+        return totp::verify(&totp.secret, code, totp.last_used_step, now, params)
             .ok()
             .map(CodeMatch::Totp);
     }
@@ -812,14 +819,15 @@ pub fn password_changed(
 }
 
 /// New recovery codes replacing the old ones (needs [`Access::Recent`](crate::session::Access)):
-/// show the codes once, carry out the effects.
+/// [`Config::recovery_code_count`] of them. Show the codes once, carry out the effects.
 pub fn regenerate_recovery_codes<R: CryptoRng + ?Sized>(
+    config: &Config,
     user_id: UserId,
     client: &Client,
     now: OffsetDateTime,
     rng: &mut R,
 ) -> Transition<Vec<RecoveryCode>> {
-    let issued = recovery::generate(rng);
+    let issued = recovery::generate(config.recovery_code_count(), rng);
     Transition {
         state: issued.codes,
         effects: vec![

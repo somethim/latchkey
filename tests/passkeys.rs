@@ -17,7 +17,7 @@ use latchkey::passkey::webauthn_rs::prelude::{
     Passkey, PublicKeyCredential, RequestChallengeResponse,
 };
 use latchkey::passkey::{
-    Binding, CEREMONY_TTL, RegistrationRequest, RelyingParty, SignInStarted, Started, record_use,
+    Binding, RegistrationRequest, RelyingParty, SignInStarted, Started, record_use,
 };
 use latchkey::session::SignInMethod;
 use latchkey::{Error, PasskeyId, UserId};
@@ -224,7 +224,7 @@ fn ceremonies_expire_and_are_bound_to_their_session_and_user() {
     let ceremony = start(&mut app);
     assert_eq!(
         ceremony
-            .into_state(session, owner, app.now + CEREMONY_TTL)
+            .into_state(session, owner, app.now + app.config.passkey_ceremony_ttl())
             .err(),
         unknown
     );
@@ -396,6 +396,41 @@ fn sealed_passkeys_open_only_for_their_row() {
 }
 
 #[test]
+fn a_two_minute_ceremony_ttl_takes_effect() {
+    let mut app = App::with_config(
+        latchkey::Config::builder(OWNER, ORIGIN)
+            .password_params(common::cheap())
+            .passkey_ceremony_ttl(Duration::minutes(2)),
+    );
+    let rp = RelyingParty::new(&app.config).unwrap();
+    assert_eq!(rp.ceremony_ttl(), Duration::minutes(2));
+    let mut key = Key::new();
+    let passkeys = owner_with_passkey(&mut app, &mut Browser::default(), &rp, &mut key);
+    let owner = app.owner_id();
+    let session = latchkey::SessionId::random(&mut app.rng);
+    let started = rp
+        .start_authentication(owner, &passkeys, session, app.now, &mut app.rng)
+        .unwrap();
+    assert_eq!(
+        started.ceremony.expires_at(),
+        app.now + Duration::minutes(2)
+    );
+    let signed_in = rp.start_discoverable(app.now, &mut app.rng).unwrap();
+    assert_eq!(
+        signed_in.ceremony.expires_at(),
+        app.now + Duration::minutes(2)
+    );
+    let default_rp = RelyingParty::from_parts("home.example.com", "Home", ORIGIN).unwrap();
+    assert_eq!(default_rp.ceremony_ttl(), Duration::minutes(5));
+    assert_eq!(
+        default_rp
+            .with_ceremony_ttl(Duration::minutes(1))
+            .ceremony_ttl(),
+        Duration::minutes(1)
+    );
+}
+
+#[test]
 fn a_relying_party_must_match_the_origin() {
     assert!(RelyingParty::from_parts("other.example", "x", ORIGIN).is_err());
 }
@@ -455,7 +490,7 @@ fn passkey_sign_in_with_an_allow_list_before_any_session() {
     let cookie = latchkey::http::SetCookie::new(
         app.config.ceremony_cookie_name().clone(),
         &binding,
-        CEREMONY_TTL,
+        rp.ceremony_ttl(),
     );
     browser.set(&cookie);
     let stored = serde_json::to_string(&ceremony).unwrap();
@@ -483,7 +518,7 @@ fn passkey_sign_in_with_an_allow_list_before_any_session() {
     );
     assert_eq!(
         restore()
-            .into_browser_state(binding.expose_secret(), app.now + CEREMONY_TTL)
+            .into_browser_state(binding.expose_secret(), app.now + rp.ceremony_ttl())
             .err(),
         unknown
     );

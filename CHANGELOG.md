@@ -14,25 +14,25 @@ The second change makes this a breaking release: apps on 0.3.0 follow "Migrating
 
 ### Added
 
-- Email sign-in codes (`flow::email_link`): the sign-in mail carries a 6-digit code
-  (`Mail::code`, an `EmailCode` with `expose_secret()`) next to its link, for when the link
-  cannot be opened on the device that asked. The code is
+- Email sign-in codes (`flow::email_link`): the sign-in mail carries a numeric code (6
+  digits by default; `Mail::code`, an `EmailCode` with `expose_secret()`) next to its link,
+  for when the link cannot be opened on the device that asked. The code is
   - bound to one pending request: `EmailLinkEvent::Request` sets a binding cookie
     (`ConfigBuilder::email_cookie_name` / `Config::email_cookie_name`, default
     `__Host-latchkey_email`) on the requesting device, for known and unknown addresses
     alike, the request is stored under the cookie's hash, and the code's hash
     (`EmailCodeHash`) is keyed with the cookie itself, so a code works only on the screen
     that asked and cannot be reversed from the database;
-  - limited to `CODE_ATTEMPTS` (5) guesses, each counted before it is checked; the fifth
-    wrong guess ends the request and its link, and wrong guesses also count towards the
-    account lockout (audited as `sign_in_failed`, detail `email_code`);
+  - limited to `Config::email_code_attempts` (5 by default) guesses, each counted before it
+    is checked; the last wrong guess ends the request and its link, and wrong guesses also
+    count towards the account lockout (audited as `sign_in_failed`, detail `email_code`);
   - valid for `Config::link_ttl` (5 minutes by default), single use, and compared in
     constant time.
   A 6-digit code is safe only with all of these together; the module documentation says
   why.
 - `EmailLinkEvent::RedeemCode { binding, code, request, account, client }`,
   `EmailCodeRequest` (the stored record, with `EmailCodeRequest::new`), `EmailCodeHash`,
-  `email_link::issue_code`, `CODE_DIGITS` and `CODE_ATTEMPTS`.
+  `email_link::issue_code(binding, digits, rng)`.
 - Effects `StoreEmailCode`, `ConsumeEmailCode` (deletes the request and its link,
   compare-and-set), `DeleteEmailCode` (a redeemed link kills its code) and
   `DeleteEmailSignIn` (a spent or expired request ends with its link). Using the link kills
@@ -50,6 +50,25 @@ The second change makes this a breaking release: apps on 0.3.0 follow "Migrating
   `MailKind::SignInReset` and `AuditKind::SignInReset` (`sign_in_reset`, detail
   `by:<owner id>`).
 - `Mail::with_code`.
+- Every remaining hard-coded policy number is a `ConfigBuilder` setting with its old value
+  as the default; `build()` refuses values outside the bounds (new `ConfigReason`
+  variants `PasswordLength`, `TotpDigits`, `TotpStep`, `TotpSkew`, `EmailCodeDigits`,
+  `EmailCodeAttempts`, `RecoveryCodeCount`, `DisplayNameLength`). The README's
+  "Configuration" table lists every setting with its default and bounds.
+  - `email_code_digits` (6; 6 to 10) and `email_code_attempts` (5; 1 to 20).
+  - `passkey_ceremony_ttl` (5 minutes), a lifetime like the others; `RelyingParty::new`
+    takes it from the config, `RelyingParty::from_parts` uses 5 minutes, and
+    `RelyingParty::with_ceremony_ttl` / `ceremony_ttl` set and read it.
+  - `recovery_code_count` (10; 4 to 32).
+  - `totp_digits` (6; 6 or 8), `totp_step` (30 seconds; 15 to 120) and `totp_skew` (1; 0 to
+    3), read back as `Config::totp_params()`, a `totp::TotpParams` (also `TotpParams::new`
+    and `Default`). Changing digits or step breaks existing authenticator enrolments:
+    latchkey stores nothing new per enrolment, so enrolments keep working only while the
+    setting stays the same. `otpauth://` URLs (and so QR codes) carry `digits` and
+    `period` whenever they are not the defaults.
+  - `password_min_len` (12; 8 to 128) and `password_max_len` (1024; 64 to 1024), read back
+    as `Config::password_length()`, a `password::PasswordLength`.
+  - `display_name_max_len` (100; 1 to 1000) for invites.
 
 ### Changed
 
@@ -70,6 +89,25 @@ The second change makes this a breaking release: apps on 0.3.0 follow "Migrating
 - `EmailLinkEvent::Request` has a new field `binding` and `EmailLinkEvent::Redeem` a new
   field `token_hash` (breaking for code that builds these events).
 - The sign-in mail's text offers the code and says the second step still follows.
+- **The primitives take the app's values** instead of reading constants:
+  `totp::verify`, `totp::enrolment`, `totp::looks_like_code` and `TotpSecret::code_at` take
+  a `TotpParams` as their last argument; `recovery::generate(count, rng)`;
+  `password::check_policy(password, length)` and
+  `PasswordHasher::hash_new_password(password, length, rng)`;
+  `email_link::issue_code(binding, digits, rng)` (clamped to 6 to 10); `flow::check_code`
+  and `flow::regenerate_recovery_codes` take `&Config` first. `EmailCodeHash::of` accepts
+  codes of 6 to 10 digits; a code of another length than the one mailed never matches.
+  `TotpRefusal::Malformed` now reads "not a code of the configured length".
+- The policy constants became `DEFAULT_*` constants: `totp::DIGITS`, `STEP_SECS`, `SKEW` are
+  `DEFAULT_DIGITS`, `DEFAULT_STEP_SECS`, `DEFAULT_SKEW` (now a `u8`); `recovery::COUNT` is
+  `DEFAULT_COUNT`; `password::MIN_LEN` / `MAX_LEN` are `DEFAULT_MIN_LEN` / `DEFAULT_MAX_LEN`;
+  `flow::invite::MAX_NAME_LEN` is `DEFAULT_MAX_NAME_LEN`; the email code's are
+  `DEFAULT_CODE_DIGITS` (a `u8`) and `DEFAULT_CODE_ATTEMPTS`. `passkey::CEREMONY_TTL` is
+  removed: lifetimes have no constants, use `Config::passkey_ceremony_ttl`.
+- The constants that stay are documented as fixed formats or security floors:
+  `token::TOKEN_BYTES`, `FOREIGN_MIN_LEN`, `FOREIGN_MAX_LEN`, `totp::SECRET_BYTES`,
+  `MIN_SECRET_BYTES`, `http::CSRF_HEADER` and `MAX_USER_AGENT`. Password verification
+  still never hashes more than 4096 bytes.
 - `email_code` is reserved like latchkey's other method names (`AppMethod::new` refuses
   it), and `ConfigBuilder::build` refuses an email cookie name equal to another cookie's.
 

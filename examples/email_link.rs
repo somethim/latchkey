@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .advance(
             &config,
             SignInEvent::Code {
-                code: totp.code_at(later)?,
+                code: totp.code_at(later, config.totp_params())?,
                 material,
                 client: Client::default(),
             },
