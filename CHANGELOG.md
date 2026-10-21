@@ -60,8 +60,11 @@ The second change makes this a breaking release: apps on 0.3.0 follow "Migrating
   password path. Only an account a password alone would sign in (no second factor, under
   `PasswordOnly::AllowedUntilEnrolled`) still reaches `EmailLink::SignedIn`. A redeemed link
   no longer clears the account's failures; the completed sign-in does.
-- **`link_ttl` defaults to 5 minutes** (was 15): sign-in links, their codes and owner setup
-  links expire sooner.
+- **`link_ttl` defaults to 5 minutes** (was 15) and now covers only email sign-in links and
+  their codes.
+- Owner setup links have their own lifetime, `ConfigBuilder::setup_link_ttl` /
+  `Config::setup_link_ttl`, **default 1 hour** (they used `link_ttl`, 15 minutes), so a
+  fresh server's owner has time to set up.
 - **`invite_ttl` defaults to 24 hours** (was 3 days); it is also the life of a sign-in
   reset's setup link.
 - `EmailLinkEvent::Request` has a new field `binding` and `EmailLinkEvent::Redeem` a new

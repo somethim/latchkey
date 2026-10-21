@@ -622,7 +622,8 @@ pub(crate) struct IssuedLink {
     pub(crate) url: String,
 }
 
-/// Issues a link of `kind` for `account`: `link_ttl`, or `invite_ttl` for invites.
+/// Issues a link of `kind` for `account`: `setup_link_ttl` for owner setup, `link_ttl` for
+/// sign-in, `invite_ttl` for invites (and sign-in resets).
 pub(crate) fn issue_link<R: CryptoRng + ?Sized>(
     config: &Config,
     account: &Account,
@@ -631,7 +632,7 @@ pub(crate) fn issue_link<R: CryptoRng + ?Sized>(
     rng: &mut R,
 ) -> IssuedLink {
     let (ttl, mut url) = match kind {
-        LinkKind::Setup => (config.link_ttl(), config.setup_target().clone()),
+        LinkKind::Setup => (config.setup_link_ttl(), config.setup_target().clone()),
         LinkKind::SignIn => (config.link_ttl(), config.sign_in_link_target().clone()),
         LinkKind::Invite => (config.invite_ttl(), config.invite_target().clone()),
     };

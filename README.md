@@ -493,7 +493,7 @@ code, and links and invites live shorter. Apps on 0.3.0 change these lines:
 | `EmailLink::SignedIn` after redeeming a link | `EmailLink::SecondFactor { account, session }`: the client has a second-factor session; continue with `SignIn::second_factor(session, account)` and `SignInEvent::Code` / `Passkey`, as after a password. `SignedIn` is left only for accounts a password alone signs in (`PasswordOnly::AllowedUntilEnrolled`, no second factor) |
 | (nothing) | store pending codes: an `email_codes` table keyed by the binding hash with `EmailCodeRequest`'s fields; handle `StoreEmailCode`, `ConsumeEmailCode`, `DeleteEmailCode`, `DeleteEmailSignIn`; add a code endpoint sending `EmailLinkEvent::RedeemCode`; show `mail.code` in your own mail templates; purge expired codes with expired links |
 | (nothing) | for "Reset sign-in": `flow::reset` and the effects `RevokeSessions`, `RemoveFactors`, `DeactivateAccount`, `DeletePendingLinks`; `MailKind::SignInReset` in your templates |
-| `link_ttl` 15 minutes, `invite_ttl` 3 days by default | 5 minutes and 24 hours; set `.link_ttl(..)` / `.invite_ttl(..)` to keep the old values (keep `link_ttl` short: it is also the code's life) |
+| `link_ttl` 15 minutes for sign-in and setup links, `invite_ttl` 3 days by default | sign-in links and codes `link_ttl` 5 minutes, owner setup links the new `setup_link_ttl` 1 hour, invites and reset links `invite_ttl` 24 hours; set them to keep other values (keep `link_ttl` short: it is also the code's life) |
 | full sessions with method `email_link` | still parse; new sign-ins record `email+totp`, `email+recovery_code` or `email+passkey`, and second-factor sessions `email_link` or `email_code` |
 | an app method or cookie named `email_code` or `__Host-latchkey_email` | pick another name: both are latchkey's now |
 | a `match` on `Effect`, `MailKind`, `AuditKind` or `SignInMethod` | handle the new variants (they are `#[non_exhaustive]`, so a `_` arm compiles, but the new effects must be carried out) |
@@ -574,7 +574,7 @@ Endpoints to flow calls:
 | `GET /me`, `/sessions`, `DELETE /sessions/{id}`, `GET /audit` | Your queries; `Session::step_up_until` for `step_up_until` |
 
 Behavioural changes: email links (and the new codes) no longer sign in on their own but
-lead to the second factor, and live 5 minutes instead of 15; `step_up` joins the reserved
+lead to the second factor, and live 5 minutes instead of 15 (owner setup links 1 hour); `step_up` joins the reserved
 method names for app-issued sessions;
 `RelyingParty::finish_discoverable` takes the claimed user and refuses an assertion whose
 user handle differs; the device cookie is still set on every completed sign-in.

@@ -91,17 +91,28 @@ fn setup_link_cannot_be_redeemed_as_another_kind() {
 }
 
 #[test]
-fn setup_link_expires_after_five_minutes() {
+fn setup_link_lasts_an_hour() {
     let mut app = App::new();
     let mut browser = Browser::default();
     app.request_setup(&mut browser);
-    let token = app.mail.last().unwrap().link_token().unwrap();
-    app.advance(Duration::minutes(5));
+    let mail = app.mail.last().unwrap().clone();
+    assert_eq!(mail.expires_at, Some(app.now + Duration::hours(1)));
+    let token = mail.link_token().unwrap();
+    app.advance(Duration::hours(1));
     assert_eq!(
         app.redeem_setup(&mut browser, LinkKind::Setup, &token)
             .err(),
         Some(Error::SignInFailed)
     );
+
+    let mut app = App::new();
+    app.request_setup(&mut browser);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.advance(Duration::minutes(59));
+    assert!(matches!(
+        app.redeem_setup(&mut browser, LinkKind::Setup, &token),
+        Ok(Setup::InSetup { .. })
+    ));
 }
 
 #[test]
@@ -912,6 +923,32 @@ fn a_request_keeps_the_devices_binding_and_unknown_addresses_get_one_too() {
 }
 
 #[test]
+fn email_sign_in_links_and_codes_last_five_minutes() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let mail = app.mail.last().unwrap().clone();
+    let five = Some(app.now + Duration::minutes(5));
+    assert_eq!(mail.expires_at, five);
+    assert!(
+        app.email_codes
+            .values()
+            .all(|request| Some(request.expires_at) == five)
+    );
+    assert!(app.links.values().any(|link| Some(link.expires_at) == five));
+    // Just inside the five minutes, the code still works.
+    app.advance(Duration::minutes(5) - Duration::seconds(1));
+    let code = mail.code.as_ref().unwrap().expose_secret().to_owned();
+    assert!(matches!(
+        app.redeem_email_code(&mut tv, &code),
+        Ok(EmailLink::SecondFactor { .. })
+    ));
+}
+
+#[test]
 fn email_link_expires() {
     let mut app = App::new();
     let mut browser = Browser::default();
@@ -1529,6 +1566,27 @@ fn a_reset_can_remove_the_password_too() {
     app.setup_password(&mut kid, "a brand new passphrase")
         .unwrap();
     app.finish_setup(&mut kid).unwrap();
+}
+
+#[test]
+fn invite_and_reset_links_last_a_day() {
+    let mut app = App::new();
+    let mut owner = Browser::default();
+    let mut kid = Browser::default();
+    let member = owner_and_member(&mut app, &mut owner, &mut kid);
+    invite(&mut app, &owner, "other@example.com").unwrap();
+    let invite_mail = app.mail.last().unwrap().clone();
+    assert_eq!(invite_mail.kind, MailKind::Invite);
+    assert_eq!(invite_mail.expires_at, Some(app.now + Duration::hours(24)));
+    reset(&mut app, &owner, member, false).unwrap();
+    let mail = app.mail.last().unwrap().clone();
+    assert_eq!(mail.expires_at, Some(app.now + Duration::hours(24)));
+    let token = mail.link_token().unwrap();
+    app.advance(Duration::hours(24) - Duration::seconds(1));
+    assert!(matches!(
+        app.redeem_setup(&mut kid, LinkKind::Invite, &token),
+        Ok(Setup::InSetup { .. })
+    ));
 }
 
 #[test]

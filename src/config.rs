@@ -59,6 +59,7 @@ struct Durations {
     pending_ttl: Duration,
     setup_ttl: Duration,
     link_ttl: Duration,
+    setup_link_ttl: Duration,
     invite_ttl: Duration,
     resend_cooldown: Duration,
     step_up_window: Duration,
@@ -72,6 +73,7 @@ impl Default for Durations {
             pending_ttl: Duration::minutes(10),
             setup_ttl: Duration::hours(1),
             link_ttl: Duration::minutes(5),
+            setup_link_ttl: Duration::hours(1),
             invite_ttl: Duration::hours(24),
             resend_cooldown: Duration::minutes(1),
             step_up_window: Duration::minutes(5),
@@ -139,10 +141,13 @@ durations!(
     pending_ttl,
     /// Lifetime of a setup session. Default 1 hour.
     setup_ttl,
-    /// Lifetime of a setup or sign-in link, and of the code mailed with a sign-in link.
-    /// Default 5 minutes (15 before 0.4). Keep it short: the 6-digit code is safe only
-    /// because it lives minutes (see [`flow::email_link`](crate::flow::email_link)).
+    /// Lifetime of an email sign-in link and the code mailed with it. Default 5 minutes (15
+    /// before 0.4). Keep it short: the 6-digit code is safe only because it lives minutes
+    /// (see [`flow::email_link`](crate::flow::email_link)).
     link_ttl,
+    /// Lifetime of the owner's first-open setup link. Default 1 hour (before 0.4 it shared
+    /// `link_ttl`, 15 minutes): a fresh server's owner may take a while to get to it.
+    setup_link_ttl,
     /// Lifetime of an invite link, and of the setup link a sign-in reset mails. Default 24
     /// hours (3 days before 0.4).
     invite_ttl,
@@ -556,6 +561,7 @@ mod tests {
         assert_eq!(config.email_cookie_name().as_str(), "__Host-latchkey_email");
         assert_eq!(config.link_ttl(), Duration::minutes(5));
         assert_eq!(config.invite_ttl(), Duration::hours(24));
+        assert_eq!(config.setup_link_ttl(), Duration::hours(1));
         assert_eq!(config.invite_url(), "https://home.example.com/invite");
         assert_eq!(config.owner_name(), "o@example.com");
         assert_eq!(config.rp_name(), "home.example.com");

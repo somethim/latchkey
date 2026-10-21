@@ -74,8 +74,9 @@ Follow "Migrating from 0.3.0" in the README: email links no longer sign in on th
 (`EmailLink::SecondFactor`, then the sign-in flow's second factor), `EmailLinkEvent::Request`
 takes `binding` (the `config.email_cookie_name()` cookie) and `Redeem` takes `token_hash`,
 pending email codes need a table and the `StoreEmailCode` / `ConsumeEmailCode` /
-`DeleteEmailCode` / `DeleteEmailSignIn` effects, `link_ttl` is 5 minutes and `invite_ttl`
-24 hours by default, and `flow::reset` adds the owner's "Reset sign-in".
+`DeleteEmailCode` / `DeleteEmailSignIn` effects, `link_ttl` (sign-in links and codes) is 5
+minutes, the new `setup_link_ttl` (owner setup links) 1 hour and `invite_ttl` 24 hours by
+default, and `flow::reset` adds the owner's "Reset sign-in".
 
 ## From a 0.3.0-dev build
 
