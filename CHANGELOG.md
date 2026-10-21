@@ -6,6 +6,70 @@ All notable changes to this crate are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
+Email sign-in gets a code next to its link, and neither skips the second factor any more.
+The second change makes this a breaking release: apps on 0.3.0 follow "Migrating from
+0.3.0" in the README.
+
+### Added
+
+- Email sign-in codes (`flow::email_link`): the sign-in mail carries a 6-digit code
+  (`Mail::code`, an `EmailCode` with `expose_secret()`) next to its link, for when the link
+  cannot be opened on the device that asked. The code is
+  - bound to one pending request: `EmailLinkEvent::Request` sets a binding cookie
+    (`ConfigBuilder::email_cookie_name` / `Config::email_cookie_name`, default
+    `__Host-latchkey_email`) on the requesting device, for known and unknown addresses
+    alike, the request is stored under the cookie's hash, and the code's hash
+    (`EmailCodeHash`) is keyed with the cookie itself, so a code works only on the screen
+    that asked and cannot be reversed from the database;
+  - limited to `CODE_ATTEMPTS` (5) guesses, each counted before it is checked; the fifth
+    wrong guess ends the request and its link, and wrong guesses also count towards the
+    account lockout (audited as `sign_in_failed`, detail `email_code`);
+  - valid for `Config::link_ttl` (5 minutes by default), single use, and compared in
+    constant time.
+  A 6-digit code is safe only with all of these together; the module documentation says
+  why.
+- `EmailLinkEvent::RedeemCode { binding, code, request, account, client }`,
+  `EmailCodeRequest` (the stored record, with `EmailCodeRequest::new`), `EmailCodeHash`,
+  `email_link::issue_code`, `CODE_DIGITS` and `CODE_ATTEMPTS`.
+- Effects `StoreEmailCode`, `ConsumeEmailCode` (deletes the request and its link,
+  compare-and-set), `DeleteEmailCode` (a redeemed link kills its code) and
+  `DeleteEmailSignIn` (a spent or expired request ends with its link). Using the link kills
+  the code, and using the code kills the link.
+- `EmailLink::SecondFactor { account, session }` and the sign-in methods
+  `SignInMethod::EmailCode` (`email_code`), `EmailTotp` (`email+totp`), `EmailRecoveryCode`
+  (`email+recovery_code`) and `EmailPasskey` (`email+passkey`), with
+  `SignInMethod::is_email`.
+- Sign-in reset (`flow::reset`), for a member who lost their second factor: from the
+  owner's recent session, `Reset::Start` with `ResetEvent::Reset` revokes the member's
+  sessions, removes their second factors (and optionally their password), deactivates the
+  account, clears its failures, deletes its older links and codes, and mails a one-time
+  setup link valid for `invite_ttl`, redeemed through `Setup` like an invite. New effects
+  `RevokeSessions`, `RemoveFactors`, `DeactivateAccount` and `DeletePendingLinks`; new
+  `MailKind::SignInReset` and `AuditKind::SignInReset` (`sign_in_reset`, detail
+  `by:<owner id>`).
+- `Mail::with_code`.
+
+### Changed
+
+- **Email sign-in no longer skips the second factor.** Redeeming a sign-in link (or a
+  code) used to sign in directly with method `email_link`; it now replaces only the
+  password and returns `EmailLink::SecondFactor` with a second-factor session, completed by
+  `SignIn::second_factor` with a TOTP code, a recovery code or a passkey, exactly like the
+  password path. Only an account a password alone would sign in (no second factor, under
+  `PasswordOnly::AllowedUntilEnrolled`) still reaches `EmailLink::SignedIn`. A redeemed link
+  no longer clears the account's failures; the completed sign-in does.
+- **`link_ttl` defaults to 5 minutes** (was 15): sign-in links, their codes and owner setup
+  links expire sooner.
+- **`invite_ttl` defaults to 24 hours** (was 3 days); it is also the life of a sign-in
+  reset's setup link.
+- `EmailLinkEvent::Request` has a new field `binding` and `EmailLinkEvent::Redeem` a new
+  field `token_hash` (breaking for code that builds these events).
+- The sign-in mail's text offers the code and says the second step still follows.
+- `email_code` is reserved like latchkey's other method names (`AppMethod::new` refuses
+  it), and `ConfigBuilder::build` refuses an email cookie name equal to another cookie's.
+
 ## [0.3.0] - 2026-10-20
 
 Builds on 0.3.0-dev with the gaps found while porting apps onto it and an API cleanup
@@ -258,7 +322,8 @@ See "Porting from 0.2" in the README.
 - `Store` trait with a SQLite implementation and its own migration table.
 - `Mailer` trait and an in-memory `TestMailer`.
 
-[Unreleased]: https://github.com/somethim/latchkey/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/somethim/latchkey/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/somethim/latchkey/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/somethim/latchkey/releases/tag/v0.3.0
 [0.3.0-dev]: https://github.com/somethim/latchkey/commit/4b99217faddc197923aa281a9bf622e1316f28cf
 [0.2.0-dev]: https://github.com/somethim/latchkey/compare/v0.1.0...HEAD

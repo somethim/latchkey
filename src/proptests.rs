@@ -6,6 +6,7 @@ use proptest::prelude::*;
 use time::{Duration, OffsetDateTime};
 
 use crate::account::{Lockout, LockoutPolicy};
+use crate::flow::email_link::{EmailCodeHash, issue_code};
 use crate::http::find_cookie;
 use crate::ids::UserId;
 use crate::limits::{FailureWindow, FixedWindow, RateLimiter};
@@ -248,9 +249,44 @@ proptest! {
         let _ = crate::password::check_policy(&text);
         let _ = crate::http::client_ip(None, [text.as_str()], true);
         let _ = text.parse::<crate::session::SignInMethod>();
+        let _ = EmailCodeHash::of(&text, &text);
         let _ = crate::flow::invite::optional_name(Some(text.clone()));
         let _ = crate::password::PasswordHash::try_from(text.as_str());
         let secret = TotpSecret::random(&mut crate::test_rng());
         let _ = totp::verify(&secret, &text, None, at(0));
+    }
+
+    #[test]
+    fn an_email_code_verifies_only_with_its_binding_and_its_digits(
+        seed in any::<u64>(),
+        guess in 0u32..1_000_000,
+        spaced in any::<bool>(),
+    ) {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let binding = token::issue(&mut rng).token;
+        let other = token::issue(&mut rng).token;
+        let (code, hash) = issue_code(&binding, &mut rng);
+        let digits = code.expose_secret();
+        prop_assert_eq!(digits.len(), 6);
+        prop_assert!(digits.bytes().all(|b| b.is_ascii_digit()));
+        let typed = if spaced {
+            format!(" {} {} ", &digits[..3], &digits[3..])
+        } else {
+            digits.to_owned()
+        };
+        prop_assert!(hash.verify(binding.expose_secret(), &typed));
+        prop_assert!(!hash.verify(other.expose_secret(), digits));
+        let guess = format!("{guess:06}");
+        prop_assert_eq!(hash.verify(binding.expose_secret(), &guess), guess == digits);
+    }
+
+    #[test]
+    fn email_code_hashes_accept_exactly_six_ascii_digits(code in ".{0,12}", seed in any::<u64>()) {
+        use rand::SeedableRng;
+        let binding = token::issue(&mut rand::rngs::StdRng::seed_from_u64(seed)).token;
+        let kept: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        let six_digits = kept.len() == 6 && kept.bytes().all(|b| b.is_ascii_digit());
+        prop_assert_eq!(EmailCodeHash::of(binding.expose_secret(), &code).is_some(), six_digits);
     }
 }

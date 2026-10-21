@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use latchkey::account::{Account, Email, Factors, Lockout, NewAccount, Role};
 use latchkey::audit::{AuditEvent, AuditKind};
-use latchkey::flow::email_link::{EmailLink, EmailLinkEvent};
+use latchkey::flow::email_link::{EmailCodeRequest, EmailLink, EmailLinkEvent};
 use latchkey::flow::setup::{Setup, SetupEvent};
 use latchkey::flow::sign_in::{SignIn, SignInEvent};
 use latchkey::flow::step_up::{StepUp, StepUpEvent};
@@ -58,6 +58,7 @@ pub struct App {
     pub rows: HashMap<UserId, Row>,
     pub sessions: HashMap<TokenHash, Session>,
     pub links: HashMap<TokenHash, LinkToken>,
+    pub email_codes: HashMap<TokenHash, EmailCodeRequest>,
     pub devices: HashSet<(UserId, TokenHash)>,
     pub audit: Vec<AuditEvent>,
     pub mail: Vec<Mail>,
@@ -93,6 +94,12 @@ impl Browser {
             .get("__Host-latchkey_device")
             .map(String::as_str)
     }
+
+    pub fn email_cookie(&self) -> Option<&str> {
+        self.cookies
+            .get("__Host-latchkey_email")
+            .map(String::as_str)
+    }
 }
 
 impl App {
@@ -115,6 +122,7 @@ impl App {
             rows: HashMap::new(),
             sessions: HashMap::new(),
             links: HashMap::new(),
+            email_codes: HashMap::new(),
             devices: HashSet::new(),
             audit: Vec::new(),
             mail: Vec::new(),
@@ -290,8 +298,67 @@ impl App {
                         session.method = Some(method);
                     }
                 }
-                _ => unreachable!("new effect"),
+                other => self.apply_email_code_or_reset(&other)?,
             }
+        }
+        Ok(())
+    }
+
+    /// The effects of email codes and sign-in resets.
+    fn apply_email_code_or_reset(&mut self, effect: &Effect) -> Result<(), Error> {
+        match *effect {
+            Effect::StoreEmailCode {
+                binding_hash,
+                request,
+            } => {
+                self.email_codes.insert(binding_hash, request);
+            }
+            Effect::DeleteEmailCode { link_hash } => {
+                self.email_codes
+                    .retain(|_, request| request.link_hash != link_hash);
+            }
+            Effect::ConsumeEmailCode {
+                binding_hash,
+                link_hash,
+            } => {
+                // One transaction; both rows must still be there.
+                let code = self.email_codes.remove(&binding_hash);
+                let link = self.links.remove(&link_hash);
+                if code.is_none() || link.is_none() {
+                    return Err(Error::SignInFailed);
+                }
+            }
+            Effect::DeleteEmailSignIn {
+                binding_hash,
+                link_hash,
+            } => {
+                self.email_codes.remove(&binding_hash);
+                self.links.remove(&link_hash);
+            }
+            Effect::RevokeSessions { user_id } => {
+                self.sessions
+                    .retain(|_, session| session.user_id != user_id);
+            }
+            Effect::RemoveFactors { user_id, password } => {
+                let row = self.rows.get_mut(&user_id).unwrap();
+                row.totp = None;
+                row.pending_totp = None;
+                row.last_step = None;
+                row.recovery.clear();
+                row.passkeys.clear();
+                if password {
+                    row.password = None;
+                }
+            }
+            Effect::DeactivateAccount { user_id } => {
+                self.rows.get_mut(&user_id).unwrap().active = false;
+            }
+            Effect::DeletePendingLinks { user_id } => {
+                self.links.retain(|_, link| link.user_id != user_id);
+                self.email_codes
+                    .retain(|_, request| request.user_id != user_id);
+            }
+            _ => unreachable!("new effect"),
         }
         Ok(())
     }
@@ -553,12 +620,14 @@ impl App {
             .as_ref()
             .and_then(|account| self.last_link_at(account.id, LinkKind::SignIn));
         let client = self.client(browser, None);
+        let binding = browser.email_cookie().map(SecretToken::from_presented);
         let step = EmailLink::Start
             .advance(
                 &self.config,
                 EmailLinkEvent::Request {
                     account,
                     last_sent_at: last,
+                    binding,
                     client,
                 },
                 self.now,
@@ -574,13 +643,53 @@ impl App {
         browser: &mut Browser,
         token: &str,
     ) -> Result<EmailLink, Error> {
-        let link = TokenHash::of(token).and_then(|hash| self.links.remove(&hash));
+        let token_hash = TokenHash::of(token);
+        let link = token_hash.and_then(|hash| self.links.remove(&hash));
         let account = link.and_then(|link| self.account(link.user_id));
         let client = self.client(browser, account.as_ref().map(|account| account.id));
         match EmailLink::Start.advance(
             &self.config,
             EmailLinkEvent::Redeem {
+                token_hash,
                 link,
+                account,
+                client,
+            },
+            self.now,
+            &mut self.rng,
+        ) {
+            Ok(step) => {
+                self.apply(step.effects, browser)?;
+                Ok(step.state)
+            }
+            Err(refusal) => Err(self.refused(refusal, browser)),
+        }
+    }
+
+    /// Posts a code with the browser's binding cookie; the attempt is counted first, as the
+    /// atomic `UPDATE ... RETURNING` would.
+    pub fn redeem_email_code(
+        &mut self,
+        browser: &mut Browser,
+        code: &str,
+    ) -> Result<EmailLink, Error> {
+        let binding = browser.email_cookie().map(SecretToken::from_presented);
+        let request = binding
+            .as_ref()
+            .and_then(SecretToken::hash)
+            .and_then(|hash| self.email_codes.get_mut(&hash))
+            .map(|request| {
+                request.attempts += 1;
+                *request
+            });
+        let account = request.and_then(|request| self.account(request.user_id));
+        let client = self.client(browser, account.as_ref().map(|account| account.id));
+        match EmailLink::Start.advance(
+            &self.config,
+            EmailLinkEvent::RedeemCode {
+                binding,
+                code: code.to_owned(),
+                request,
                 account,
                 client,
             },

@@ -12,7 +12,9 @@ use common::{App, Browser, OWNER, PASSWORD, code_of};
 use latchkey::account::Email;
 use latchkey::audit::AuditKind;
 use latchkey::error::{ConflictReason, InvalidRequestReason};
+use latchkey::flow::email_link::{CODE_ATTEMPTS, EmailLink};
 use latchkey::flow::invite::{Invite, InviteEvent};
+use latchkey::flow::reset::{Reset, ResetEvent};
 use latchkey::flow::setup::Setup;
 use latchkey::flow::sign_in::{SignIn, SignInEvent};
 use latchkey::flow::step_up::StepUp;
@@ -20,6 +22,7 @@ use latchkey::flow::{self, LinkKind};
 use latchkey::limits::RateLimits;
 use latchkey::mail::MailKind;
 use latchkey::session::{Access, AppMethod, SignInMethod, Stage};
+use latchkey::token::TokenHash;
 use latchkey::{Error, Lockout, LockoutPolicy, PasswordOnly, StepUpFailures};
 use time::Duration;
 
@@ -88,12 +91,12 @@ fn setup_link_cannot_be_redeemed_as_another_kind() {
 }
 
 #[test]
-fn setup_link_expires_after_fifteen_minutes() {
+fn setup_link_expires_after_five_minutes() {
     let mut app = App::new();
     let mut browser = Browser::default();
     app.request_setup(&mut browser);
     let token = app.mail.last().unwrap().link_token().unwrap();
-    app.advance(Duration::minutes(15));
+    app.advance(Duration::minutes(5));
     assert_eq!(
         app.redeem_setup(&mut browser, LinkKind::Setup, &token)
             .err(),
@@ -578,30 +581,334 @@ fn a_successful_sign_in_does_not_reset_the_throttle() {
 
 // ---- email link ----
 
+fn sign_in_code(app: &App) -> String {
+    let mail = app.mail.last().unwrap();
+    assert_eq!(mail.kind, MailKind::SignInLink);
+    mail.code.as_ref().unwrap().expose_secret().to_owned()
+}
+
+fn second_factor_session(state: &EmailLink) -> latchkey::session::Session {
+    match state {
+        EmailLink::SecondFactor { session, .. } => session.clone(),
+        other => panic!("expected a second factor, got {other:?}"),
+    }
+}
+
+/// The second factor after an emailed link or code.
+fn totp_after_email(
+    app: &mut App,
+    browser: &mut Browser,
+    secret: &latchkey::totp::TotpSecret,
+) -> Result<SignIn, Error> {
+    app.advance(Duration::seconds(30));
+    let code = secret.code_at(app.now).unwrap();
+    app.code_step(browser, &code)
+}
+
 #[test]
-fn email_link_signs_in_directly_once() {
+fn email_link_needs_the_second_factor_and_works_once() {
     let mut app = App::new();
     let mut browser = Browser::default();
-    app.setup_owner(&mut browser);
+    let (secret, _) = app.setup_owner(&mut browser);
     app.advance(Duration::minutes(2));
     let mut phone = Browser::default();
     app.request_email_link(&mut phone, OWNER);
-    let mail = app.mail.last().unwrap().clone();
-    assert_eq!(mail.kind, MailKind::SignInLink);
-    let token = mail.link_token().unwrap();
-    let done = app.redeem_email_link(&mut phone, &token).unwrap();
-    assert!(matches!(
-        done,
-        latchkey::flow::email_link::EmailLink::SignedIn { .. }
-    ));
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    let state = app.redeem_email_link(&mut phone, &token).unwrap();
+    let pending = second_factor_session(&state);
+    assert_eq!(pending.stage, Stage::SecondFactor);
+    assert_eq!(pending.method, Some(SignInMethod::EmailLink));
     assert_eq!(
-        app.session_of(&phone).unwrap().method,
-        Some(SignInMethod::EmailLink)
+        pending.authorize(true, Access::SignedIn, app.config.step_up_window(), app.now),
+        Err(Error::Unauthorized),
+        "a link alone does not sign in"
     );
+    assert_eq!(app.audit_count(AuditKind::SignIn), 1, "only setup so far");
+    let done = totp_after_email(&mut app, &mut phone, &secret).unwrap();
+    assert_eq!(signed_in_method(&done), Some(SignInMethod::EmailTotp));
+    assert_eq!(app.session_of(&phone).unwrap().stage, Stage::Full);
     assert_eq!(
         app.redeem_email_link(&mut Browser::default(), &token).err(),
         Some(Error::SignInFailed)
     );
+}
+
+#[test]
+fn email_link_then_a_recovery_code_or_a_passkey() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    let (_, codes) = app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut phone = Browser::default();
+    app.request_email_link(&mut phone, OWNER);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.redeem_email_link(&mut phone, &token).unwrap();
+    let done = app.code_step(&mut phone, &code_of(&codes, 0)).unwrap();
+    assert_eq!(
+        signed_in_method(&done),
+        Some(SignInMethod::EmailRecoveryCode)
+    );
+
+    app.advance(Duration::minutes(2));
+    let mut laptop = Browser::default();
+    app.request_email_link(&mut laptop, OWNER);
+    let code = sign_in_code(&app);
+    let state = app.redeem_email_code(&mut laptop, &code).unwrap();
+    let session = second_factor_session(&state);
+    let account = app.account(session.user_id).unwrap();
+    let client = app.client(&laptop, Some(account.id));
+    let step = SignIn::second_factor(session, account)
+        .advance(
+            &app.config,
+            SignInEvent::Passkey {
+                verified: true,
+                client,
+            },
+            app.now,
+            &mut app.rng,
+        )
+        .unwrap();
+    assert_eq!(
+        signed_in_method(&step.state),
+        Some(SignInMethod::EmailPasskey)
+    );
+    app.apply(step.effects, &mut laptop).unwrap();
+}
+
+#[test]
+fn email_code_needs_the_second_factor_and_works_once() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    let (secret, _) = app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    assert!(
+        tv.email_cookie().is_some(),
+        "the requesting device is bound"
+    );
+    let code = sign_in_code(&app);
+    assert_eq!(code.len(), 6);
+    assert_eq!(app.email_codes.len(), 1);
+    assert!(app.email_codes.values().all(
+        |request| request.attempts == 0 && request.expires_at == app.now + Duration::minutes(5)
+    ));
+    let state = app.redeem_email_code(&mut tv, &code).unwrap();
+    let pending = second_factor_session(&state);
+    assert_eq!(pending.method, Some(SignInMethod::EmailCode));
+    assert_eq!(pending.stage, Stage::SecondFactor);
+    assert!(tv.email_cookie().is_none(), "the binding cookie is cleared");
+    assert!(app.email_codes.is_empty());
+    let done = totp_after_email(&mut app, &mut tv, &secret).unwrap();
+    assert_eq!(signed_in_method(&done), Some(SignInMethod::EmailTotp));
+    // The cookie is gone, and with it the request: the code cannot be used again, even with
+    // the old cookie put back.
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed)
+    );
+}
+
+#[test]
+fn a_code_works_only_on_the_request_that_sent_it() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let tv_code = sign_in_code(&app);
+    app.advance(Duration::minutes(2));
+    let mut attacker = Browser::default();
+    app.request_email_link(&mut attacker, OWNER);
+    let attacker_code = sign_in_code(&app);
+    assert_ne!(tv.email_cookie(), attacker.email_cookie());
+    // The victim's code typed on another request's screen fails (unless the two codes
+    // happen to be equal, one chance in a million, which this seed avoids).
+    assert_ne!(tv_code, attacker_code);
+    assert_eq!(
+        app.redeem_email_code(&mut attacker, &tv_code).err(),
+        Some(Error::SignInFailed)
+    );
+    assert_eq!(
+        app.redeem_email_code(&mut Browser::default(), &tv_code)
+            .err(),
+        Some(Error::SignInFailed),
+        "no cookie, no code"
+    );
+    let mut forged = Browser::default();
+    forged
+        .cookies
+        .insert("__Host-latchkey_email".into(), "A".repeat(43));
+    assert_eq!(
+        app.redeem_email_code(&mut forged, &tv_code).err(),
+        Some(Error::SignInFailed)
+    );
+    assert!(matches!(
+        app.redeem_email_code(&mut tv, &tv_code),
+        Ok(EmailLink::SecondFactor { .. })
+    ));
+}
+
+#[test]
+fn an_expired_code_fails_and_ends_its_request() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let code = sign_in_code(&app);
+    app.advance(Duration::minutes(5));
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed)
+    );
+    assert!(app.email_codes.is_empty());
+    assert!(tv.email_cookie().is_none());
+}
+
+#[test]
+fn the_attempt_budget_ends_the_request_and_its_link() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let mail = app.mail.last().unwrap().clone();
+    let code = mail.code.as_ref().unwrap().expose_secret().to_owned();
+    let wrong = if code == "000000" { "000001" } else { "000000" };
+    for attempt in 1..=CODE_ATTEMPTS {
+        assert_eq!(
+            app.redeem_email_code(&mut tv, wrong).err(),
+            Some(Error::SignInFailed)
+        );
+        assert_eq!(
+            app.email_codes.len(),
+            usize::from(attempt < CODE_ATTEMPTS),
+            "attempt {attempt}"
+        );
+    }
+    assert_eq!(
+        app.audit
+            .iter()
+            .filter(|event| event.detail.as_deref() == Some("email_code"))
+            .count(),
+        5,
+        "wrong codes are audited and counted like wrong passwords"
+    );
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed),
+        "the request is dead"
+    );
+    assert_eq!(
+        app.redeem_email_link(&mut Browser::default(), &mail.link_token().unwrap())
+            .err(),
+        Some(Error::SignInFailed),
+        "and so is its link"
+    );
+}
+
+#[test]
+fn guesses_that_raced_past_the_budget_are_refused_even_when_right() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let code = sign_in_code(&app);
+    // Five guesses were counted by concurrent requests before this one was checked.
+    for request in app.email_codes.values_mut() {
+        request.attempts = CODE_ATTEMPTS;
+    }
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed)
+    );
+    assert!(app.email_codes.is_empty());
+}
+
+#[test]
+fn the_link_kills_the_code() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let code = sign_in_code(&app);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    let mut phone = Browser::default();
+    app.redeem_email_link(&mut phone, &token).unwrap();
+    assert!(app.email_codes.is_empty());
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed)
+    );
+}
+
+#[test]
+fn the_code_kills_the_link() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let code = sign_in_code(&app);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.redeem_email_code(&mut tv, &code).unwrap();
+    assert_eq!(
+        app.redeem_email_link(&mut Browser::default(), &token).err(),
+        Some(Error::SignInFailed)
+    );
+}
+
+#[test]
+fn a_code_that_lost_the_race_to_its_link_is_refused() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let code = sign_in_code(&app);
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    // The link request deleted the link but had not yet deleted the code.
+    app.links.remove(&TokenHash::of(&token).unwrap());
+    assert_eq!(
+        app.redeem_email_code(&mut tv, &code).err(),
+        Some(Error::SignInFailed),
+        "ConsumeEmailCode finds no link"
+    );
+}
+
+#[test]
+fn a_request_keeps_the_devices_binding_and_unknown_addresses_get_one_too() {
+    let mut app = App::new();
+    let mut browser = Browser::default();
+    app.setup_owner(&mut browser);
+    let mut stranger = Browser::default();
+    app.request_email_link(&mut stranger, "nobody@example.com");
+    assert!(stranger.email_cookie().is_some(), "no oracle in the cookie");
+    app.advance(Duration::minutes(2));
+    let mut tv = Browser::default();
+    app.request_email_link(&mut tv, OWNER);
+    let first = tv.email_cookie().unwrap().to_owned();
+    let code = sign_in_code(&app);
+    // Asking again within the cooldown mails nothing and keeps the binding, so the first
+    // code still works.
+    let mails = app.mail.len();
+    app.request_email_link(&mut tv, OWNER);
+    assert_eq!(app.mail.len(), mails);
+    assert_eq!(tv.email_cookie(), Some(first.as_str()));
+    assert!(matches!(
+        app.redeem_email_code(&mut tv, &code),
+        Ok(EmailLink::SecondFactor { .. })
+    ));
 }
 
 #[test]
@@ -611,10 +918,27 @@ fn email_link_expires() {
     app.setup_owner(&mut browser);
     app.request_email_link(&mut browser, OWNER);
     let token = app.mail.last().unwrap().link_token().unwrap();
-    app.advance(Duration::minutes(15));
+    app.advance(Duration::minutes(5));
     assert_eq!(
         app.redeem_email_link(&mut browser, &token).err(),
         Some(Error::SignInFailed)
+    );
+}
+
+#[test]
+fn a_password_only_account_signs_in_with_an_email_link_when_allowed() {
+    let mut app = password_only();
+    let mut browser = Browser::default();
+    setup_with_password_only(&mut app, &mut browser).unwrap();
+    app.advance(Duration::minutes(2));
+    let mut phone = Browser::default();
+    app.request_email_link(&mut phone, OWNER);
+    let code = sign_in_code(&app);
+    let state = app.redeem_email_code(&mut phone, &code).unwrap();
+    assert!(matches!(state, EmailLink::SignedIn { .. }));
+    assert_eq!(
+        app.session_of(&phone).unwrap().method,
+        Some(SignInMethod::EmailCode)
     );
 }
 
@@ -725,14 +1049,16 @@ fn a_forged_device_cookie_counts_as_unknown_and_is_replaced() {
 fn email_link_sign_in_on_an_unknown_device_is_mailed() {
     let mut app = App::new();
     let mut browser = Browser::default();
-    app.setup_owner(&mut browser);
+    let (secret, _) = app.setup_owner(&mut browser);
     let mut phone = Browser::default();
     app.request_email_link(&mut phone, OWNER);
     let token = app.mail.last().unwrap().link_token().unwrap();
     app.redeem_email_link(&mut phone, &token).unwrap();
+    assert_eq!(app.mail.last().unwrap().kind, MailKind::SignInLink);
+    totp_after_email(&mut app, &mut phone, &secret).unwrap();
     let mail = app.mail.last().unwrap();
     assert_eq!(mail.kind, MailKind::NewDevice);
-    assert!(mail.text().contains("Method: email_link"));
+    assert!(mail.text().contains("Method: email+totp"));
 }
 
 // ---- step-up ----
@@ -1025,8 +1351,8 @@ fn owner_invites_a_family_member_who_sets_up() {
     assert_eq!(mail.to.as_str(), "kid@example.com");
     assert_eq!(
         mail.expires_at,
-        Some(app.now + Duration::days(3)),
-        "invites last three days"
+        Some(app.now + Duration::hours(24)),
+        "invites last a day"
     );
     let mut kid = Browser::default();
     let token = mail.link_token().unwrap();
@@ -1059,6 +1385,190 @@ fn invite_needs_a_recent_sign_in() {
         invite(&mut app, &owner, "kid@example.com").err(),
         Some(Error::StepUpRequired)
     );
+}
+
+// ---- sign-in reset ----
+
+fn reset(
+    app: &mut App,
+    admin: &Browser,
+    member: latchkey::UserId,
+    remove_password: bool,
+) -> Result<latchkey::Account, Error> {
+    let session = app.session_of(admin).unwrap();
+    let admin_account = app.account(session.user_id).unwrap();
+    let member = app.account(member).unwrap();
+    let client = app.client(admin, None);
+    match Reset::Start.advance(
+        &app.config,
+        ResetEvent::Reset {
+            admin: admin_account,
+            session,
+            member,
+            remove_password,
+            client,
+        },
+        app.now,
+        &mut app.rng,
+    ) {
+        Ok(step) => {
+            app.apply(step.effects, &mut Browser::default())?;
+            match step.state {
+                Reset::Done { account } => Ok(account),
+                _ => unreachable!(),
+            }
+        }
+        Err(refusal) => Err(app.refused(refusal, &mut Browser::default())),
+    }
+}
+
+/// The owner and a member who finished setup with a password and TOTP, signed in on `kid`.
+fn owner_and_member(app: &mut App, owner: &mut Browser, kid: &mut Browser) -> latchkey::UserId {
+    app.setup_owner(owner);
+    let member = invite(app, owner, "kid@example.com").unwrap();
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.redeem_setup(kid, LinkKind::Invite, &token).unwrap();
+    app.setup_password(kid, PASSWORD).unwrap();
+    app.enrol_totp(member.id);
+    app.finish_setup(kid).unwrap();
+    member.id
+}
+
+#[test]
+fn the_owner_resets_a_member_who_lost_their_second_factor() {
+    let mut app = App::new();
+    let mut owner = Browser::default();
+    let mut kid = Browser::default();
+    let member = owner_and_member(&mut app, &mut owner, &mut kid);
+    let mut tablet = Browser::default();
+    app.request_email_link(&mut tablet, "kid@example.com");
+    let old_link = app.mail.last().unwrap().link_token().unwrap();
+    assert!(app.session_of(&kid).is_some());
+
+    let account = reset(&mut app, &owner, member, false).unwrap();
+    assert!(!account.active);
+    assert_eq!(account.factors, latchkey::Factors::new(true, false, 0));
+    assert_eq!(app.account(member).unwrap().factors, account.factors);
+    assert!(app.session_of(&kid).is_none(), "signed out everywhere");
+    assert_eq!(app.rows[&member].recovery.len(), 0);
+    assert!(
+        app.email_codes.is_empty() && app.links.values().all(|link| link.kind == LinkKind::Invite),
+        "older links and codes are gone"
+    );
+    assert_eq!(
+        app.redeem_email_link(&mut tablet, &old_link).err(),
+        Some(Error::SignInFailed)
+    );
+    let mail = app.mail.last().unwrap().clone();
+    assert_eq!(mail.kind, MailKind::SignInReset);
+    assert_eq!(mail.to.as_str(), "kid@example.com");
+    assert_eq!(mail.expires_at, Some(app.now + Duration::hours(24)));
+    assert!(
+        mail.link
+            .starts_with("https://home.example.com/invite?token=")
+    );
+    let event = app
+        .audit
+        .iter()
+        .find(|event| event.kind == AuditKind::SignInReset)
+        .unwrap();
+    assert_eq!(event.user_id, Some(member));
+    assert_eq!(event.detail, Some(format!("by:{}", app.owner_id())));
+    assert_eq!(
+        app.password_step(&mut kid, "kid@example.com", PASSWORD)
+            .err(),
+        Some(Error::SignInFailed),
+        "no sign-in until setup is done again"
+    );
+
+    // The member sets up again through the link: the old password stays unless changed.
+    let token = mail.link_token().unwrap();
+    app.redeem_setup(&mut kid, LinkKind::Invite, &token)
+        .unwrap();
+    assert_eq!(
+        app.finish_setup(&mut kid).err(),
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::SecondFactorRequired
+        ))
+    );
+    let secret = app.enrol_totp(member);
+    app.advance(Duration::seconds(30));
+    app.finish_setup(&mut kid).unwrap();
+    assert!(app.account(member).unwrap().active);
+    app.advance(Duration::seconds(30));
+    let mut laptop = Browser::default();
+    let done = app
+        .sign_in(&mut laptop, "kid@example.com", PASSWORD, &secret)
+        .unwrap();
+    assert_eq!(signed_in_method(&done), Some(SignInMethod::PasswordTotp));
+    assert_eq!(
+        app.redeem_setup(&mut kid, LinkKind::Invite, &token).err(),
+        Some(Error::SignInFailed),
+        "the reset link works once"
+    );
+}
+
+#[test]
+fn a_reset_can_remove_the_password_too() {
+    let mut app = App::new();
+    let mut owner = Browser::default();
+    let mut kid = Browser::default();
+    let member = owner_and_member(&mut app, &mut owner, &mut kid);
+    let account = reset(&mut app, &owner, member, true).unwrap();
+    assert_eq!(account.factors, latchkey::Factors::default());
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.redeem_setup(&mut kid, LinkKind::Invite, &token)
+        .unwrap();
+    app.enrol_totp(member);
+    assert_eq!(
+        app.finish_setup(&mut kid).err(),
+        Some(Error::InvalidRequest(
+            InvalidRequestReason::PasswordRequired
+        ))
+    );
+    app.setup_password(&mut kid, "a brand new passphrase")
+        .unwrap();
+    app.finish_setup(&mut kid).unwrap();
+}
+
+#[test]
+fn the_reset_link_expires_after_a_day() {
+    let mut app = App::new();
+    let mut owner = Browser::default();
+    let mut kid = Browser::default();
+    let member = owner_and_member(&mut app, &mut owner, &mut kid);
+    reset(&mut app, &owner, member, false).unwrap();
+    let token = app.mail.last().unwrap().link_token().unwrap();
+    app.advance(Duration::hours(24));
+    assert_eq!(
+        app.redeem_setup(&mut kid, LinkKind::Invite, &token).err(),
+        Some(Error::SignInFailed)
+    );
+}
+
+#[test]
+fn only_the_owner_resets_only_members_and_only_recently() {
+    let mut app = App::new();
+    let mut owner = Browser::default();
+    let mut kid = Browser::default();
+    let member = owner_and_member(&mut app, &mut owner, &mut kid);
+    let owner_id = app.owner_id();
+    assert_eq!(
+        reset(&mut app, &kid, owner_id, false).err(),
+        Some(Error::Forbidden),
+        "members cannot reset"
+    );
+    assert_eq!(
+        reset(&mut app, &owner, owner_id, false).err(),
+        Some(Error::Forbidden),
+        "the owner is reset to first-open setup instead"
+    );
+    app.advance(Duration::minutes(6));
+    assert_eq!(
+        reset(&mut app, &owner, member, false).err(),
+        Some(Error::StepUpRequired)
+    );
+    assert!(app.account(member).unwrap().active, "nothing happened");
 }
 
 // ---- sessions started by the app, sign-out ----

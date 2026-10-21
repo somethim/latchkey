@@ -1,6 +1,6 @@
 ---
 name: latchkey-basics
-description: How to use the latchkey crate (sans-IO sign-in building blocks and policy for Rust) correctly. Use when writing or reviewing code that calls latchkey for passwords, TOTP, recovery codes, passkeys, session tokens, cookies, CSRF, lockout, rate limits, or its sign-in, setup, invite, email-link and step-up flows.
+description: How to use the latchkey crate (sans-IO sign-in building blocks and policy for Rust) correctly. Use when writing or reviewing code that calls latchkey for passwords, TOTP, recovery codes, passkeys, session tokens, cookies, CSRF, lockout, rate limits, or its sign-in, setup, invite, email link and code, sign-in reset and step-up flows.
 ---
 
 # Using latchkey
@@ -53,7 +53,41 @@ app side right is what keeps sign-in secure.
   signs such an account in directly (`SignIn::SignedIn`, method `password_only`); enrolling
   TOTP or a passkey makes the second factor required again. Do not fake a second factor.
 - Redeem links atomically (`DELETE ... RETURNING`), then pass the deleted `LinkToken` (or
-  `None`) to the flow.
+  `None`) to the flow, with `token_hash: TokenHash::of(token)` for a sign-in link.
+
+## Email sign-in (link and code)
+
+- One mail carries a link and a 6-digit code (`mail.code`), both valid `config.link_ttl()`
+  (5 minutes). Neither signs in: both lead to `EmailLink::SecondFactor`; continue with
+  `SignIn::second_factor(session, account)` and `SignInEvent::Code` / `Passkey`. Never
+  issue a full session after a link or code yourself.
+- `EmailLinkEvent::Request` takes the presented `config.email_cookie_name()` cookie as
+  `binding` and returns a `SetCookie` for it: carry it out for every request, known
+  address or not (no oracle).
+- Store `StoreEmailCode { binding_hash, request }` (insert or replace) in its own table.
+  For a guess, count the attempt and read the row in **one** statement
+  (`UPDATE email_codes SET attempts = attempts + 1 WHERE binding_hash = ? RETURNING ...`)
+  and pass that row as `request` in `EmailLinkEvent::RedeemCode`. Never check first and
+  count later: racing guesses would escape the 5-guess budget.
+- `ConsumeEmailCode { binding_hash, link_hash }` deletes the request and its link in one
+  transaction; if either row is already gone, refuse. `DeleteEmailCode { link_hash }` after
+  a link, `DeleteEmailSignIn` when a request ends. Purge expired rows.
+- The 6-digit code is safe only while it is bound to the requesting cookie, has the
+  5-guess budget (wrong guesses also feed the lockout), lives minutes and still needs the
+  second factor. Do not lengthen `link_ttl` much, accept codes without the cookie, or store
+  the code itself.
+
+## Sign-in reset
+
+- "Reset sign-in" for a member who lost their second factor: `flow::reset::Reset::Start`
+  with `ResetEvent::Reset { admin, session, member, remove_password, client }` from the
+  owner's `Access::Recent` session. Carry out `RevokeSessions` (every session of the
+  member), `RemoveFactors` (TOTP and pending TOTP, last step, passkeys, recovery codes; the
+  password too when `password` is true), `DeactivateAccount`, `ClearFailures`,
+  `DeletePendingLinks` (links and email codes), the invite-kind `StoreLinkToken`, the
+  `MailKind::SignInReset` mail and the audit event. The member redeems the link on the
+  invite page through `Setup` (`Redeem { kind: LinkKind::Invite }`) and must enrol a new
+  second factor before `Finish`.
 
 ## Flows
 

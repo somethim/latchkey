@@ -1,6 +1,6 @@
 [package]
 name = "latchkey"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Sans-IO sign-in building blocks and policy: Argon2id passwords, TOTP, recovery codes, passkeys, tokens, sealing, cookies, lockout, rate limits and sign-in flows as pure state machines"

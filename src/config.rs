@@ -38,6 +38,7 @@ pub struct Config {
     cookie_name: CookieName,
     device_cookie_name: CookieName,
     ceremony_cookie_name: CookieName,
+    email_cookie_name: CookieName,
     setup_url: Url,
     sign_in_link_url: Url,
     invite_url: Url,
@@ -70,15 +71,16 @@ impl Default for Durations {
             session_ttl: Duration::days(30),
             pending_ttl: Duration::minutes(10),
             setup_ttl: Duration::hours(1),
-            link_ttl: Duration::minutes(15),
-            invite_ttl: Duration::days(3),
+            link_ttl: Duration::minutes(5),
+            invite_ttl: Duration::hours(24),
             resend_cooldown: Duration::minutes(1),
             step_up_window: Duration::minutes(5),
         }
     }
 }
 
-/// Builds a [`Config`]; every setting has the default latchkey 0.2 used.
+/// Builds a [`Config`]; every setting has a default (latchkey 0.2's, except the shorter link
+/// and invite lifetimes).
 #[derive(Debug, Clone)]
 #[must_use = "call build() to get a Config"]
 pub struct ConfigBuilder {
@@ -90,6 +92,7 @@ pub struct ConfigBuilder {
     cookie_name: String,
     device_cookie_name: String,
     ceremony_cookie_name: String,
+    email_cookie_name: String,
     setup_path: String,
     sign_in_link_path: String,
     invite_path: String,
@@ -136,9 +139,12 @@ durations!(
     pending_ttl,
     /// Lifetime of a setup session. Default 1 hour.
     setup_ttl,
-    /// Lifetime of a setup or sign-in link. Default 15 minutes.
+    /// Lifetime of a setup or sign-in link, and of the code mailed with a sign-in link.
+    /// Default 5 minutes (15 before 0.4). Keep it short: the 6-digit code is safe only
+    /// because it lives minutes (see [`flow::email_link`](crate::flow::email_link)).
     link_ttl,
-    /// Lifetime of an invite link. Default 3 days.
+    /// Lifetime of an invite link, and of the setup link a sign-in reset mails. Default 24
+    /// hours (3 days before 0.4).
     invite_ttl,
     /// Minimum time between two setup or sign-in links to one account. Default 1 minute.
     resend_cooldown,
@@ -183,6 +189,14 @@ impl ConfigBuilder {
     /// `__Host-` and differ from the other two. Default `__Host-latchkey_ceremony`.
     pub fn ceremony_cookie_name(mut self, name: &str) -> Self {
         name.clone_into(&mut self.ceremony_cookie_name);
+        self
+    }
+
+    /// The name of the cookie that binds an email sign-in code to the device that asked for
+    /// it ([`flow::email_link`](crate::flow::email_link)); must start with `__Host-` and differ
+    /// from the other cookies. Default `__Host-latchkey_email`.
+    pub fn email_cookie_name(mut self, name: &str) -> Self {
+        name.clone_into(&mut self.email_cookie_name);
         self
     }
 
@@ -309,10 +323,18 @@ impl ConfigBuilder {
         let cookie_name = cookie(&self.cookie_name)?;
         let device_cookie_name = cookie(&self.device_cookie_name)?;
         let ceremony_cookie_name = cookie(&self.ceremony_cookie_name)?;
-        if cookie_name == device_cookie_name
-            || cookie_name == ceremony_cookie_name
-            || device_cookie_name == ceremony_cookie_name
-        {
+        let email_cookie_name = cookie(&self.email_cookie_name)?;
+        let names = [
+            &cookie_name,
+            &device_cookie_name,
+            &ceremony_cookie_name,
+            &email_cookie_name,
+        ];
+        let distinct = names
+            .iter()
+            .enumerate()
+            .all(|(i, a)| names.iter().skip(i + 1).all(|b| a != b));
+        if !distinct {
             return Err(Error::Config(ConfigReason::CookieNamesEqual));
         }
         let join = |path: &str| {
@@ -338,6 +360,7 @@ impl ConfigBuilder {
             cookie_name,
             device_cookie_name,
             ceremony_cookie_name,
+            email_cookie_name,
             origin,
             durations: self.durations,
             lockout: self.lockout,
@@ -363,6 +386,7 @@ impl Config {
             cookie_name: "__Host-latchkey".to_owned(),
             device_cookie_name: "__Host-latchkey_device".to_owned(),
             ceremony_cookie_name: "__Host-latchkey_ceremony".to_owned(),
+            email_cookie_name: "__Host-latchkey_email".to_owned(),
             setup_path: "/setup".to_owned(),
             sign_in_link_path: "/sign-in/link".to_owned(),
             invite_path: "/invite".to_owned(),
@@ -438,6 +462,12 @@ impl Config {
         &self.ceremony_cookie_name
     }
 
+    /// The email sign-in binding cookie's name.
+    #[must_use]
+    pub fn email_cookie_name(&self) -> &CookieName {
+        &self.email_cookie_name
+    }
+
     /// Where setup links point.
     #[must_use]
     pub fn setup_url(&self) -> &str {
@@ -510,7 +540,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_latchkey_0_2() -> Result<(), Error> {
+    fn defaults() -> Result<(), Error> {
         let config = Config::builder("o@example.com", "https://home.example.com").build()?;
         assert_eq!(config.cookie_name().as_str(), "__Host-latchkey");
         assert_eq!(
@@ -523,7 +553,9 @@ mod tests {
         );
         assert_eq!(config.session_ttl(), Duration::days(30));
         assert_eq!(config.step_up_window(), Duration::minutes(5));
-        assert_eq!(config.link_ttl(), Duration::minutes(15));
+        assert_eq!(config.email_cookie_name().as_str(), "__Host-latchkey_email");
+        assert_eq!(config.link_ttl(), Duration::minutes(5));
+        assert_eq!(config.invite_ttl(), Duration::hours(24));
         assert_eq!(config.invite_url(), "https://home.example.com/invite");
         assert_eq!(config.owner_name(), "o@example.com");
         assert_eq!(config.rp_name(), "home.example.com");
@@ -549,6 +581,18 @@ mod tests {
                 .is_err()
         );
         assert!(builder().ceremony_cookie_name("ceremony").build().is_err());
+        assert!(
+            builder()
+                .email_cookie_name("__Host-latchkey_ceremony")
+                .build()
+                .is_err()
+        );
+        assert!(
+            builder()
+                .email_cookie_name("__Host-latchkey")
+                .build()
+                .is_err()
+        );
         assert!(
             Config::builder("o@example.com", "http://home.example.com")
                 .build()
@@ -608,6 +652,7 @@ mod insecure_localhost_tests {
             assert_eq!(config.cookie_name().as_str(), "latchkey");
             assert_eq!(config.device_cookie_name().as_str(), "latchkey_device");
             assert_eq!(config.ceremony_cookie_name().as_str(), "latchkey_ceremony");
+            assert_eq!(config.email_cookie_name().as_str(), "latchkey_email");
             assert!(!config.cookie_name().is_secure());
         }
         let refused = Some(Error::Config(ConfigReason::InsecureCookiesNotLocalhost));

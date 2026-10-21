@@ -70,6 +70,7 @@ const RESERVED_METHODS: &[&str] = &[
     "password_only",
     "passkey",
     "email_link",
+    "email_code",
     "totp",
     "recovery_code",
     "step_up",
@@ -78,7 +79,7 @@ const RESERVED_METHODS: &[&str] = &[
 /// A sign-in method the app names for sessions it completes itself (see
 /// [`issue_session`](crate::flow::issue_session)): 1 to 32 characters from `a-z`, `0-9` and
 /// `_`, and none of latchkey's own (`setup`, `password`, `password_only`, `passkey`,
-/// `email_link`, `totp`, `recovery_code`, `step_up`).
+/// `email_link`, `email_code`, `totp`, `recovery_code`, `step_up`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppMethod(String);
 
@@ -136,8 +137,19 @@ pub enum SignInMethod {
     PasswordOnly,
     /// A passkey on its own, discoverable or from an allow-list (`passkey`).
     Passkey,
-    /// An emailed sign-in link (`email_link`).
+    /// An emailed sign-in link (`email_link`): on a second-factor session, the link stood in
+    /// for the password. Full sessions stored by latchkey before 0.4, when a link signed in
+    /// on its own, also carry it.
     EmailLink,
+    /// An emailed sign-in code, typed on the device that asked (`email_code`); on a
+    /// second-factor session, like [`EmailLink`](SignInMethod::EmailLink).
+    EmailCode,
+    /// An emailed link or code, then TOTP (`email+totp`).
+    EmailTotp,
+    /// An emailed link or code, then a recovery code (`email+recovery_code`).
+    EmailRecoveryCode,
+    /// An emailed link or code, then a passkey (`email+passkey`).
+    EmailPasskey,
     /// A step-up re-authentication (`step_up`).
     StepUp,
     /// A sign-in the app completed itself.
@@ -145,6 +157,12 @@ pub enum SignInMethod {
 }
 
 impl SignInMethod {
+    /// Whether this first step was an emailed link or code rather than a password.
+    #[must_use]
+    pub const fn is_email(&self) -> bool {
+        matches!(self, SignInMethod::EmailLink | SignInMethod::EmailCode)
+    }
+
     /// The stored name, as latchkey 0.2 wrote it.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -157,6 +175,10 @@ impl SignInMethod {
             SignInMethod::PasswordOnly => "password_only",
             SignInMethod::Passkey => "passkey",
             SignInMethod::EmailLink => "email_link",
+            SignInMethod::EmailCode => "email_code",
+            SignInMethod::EmailTotp => "email+totp",
+            SignInMethod::EmailRecoveryCode => "email+recovery_code",
+            SignInMethod::EmailPasskey => "email+passkey",
             SignInMethod::StepUp => "step_up",
             SignInMethod::App(method) => method.as_str(),
         }
@@ -176,6 +198,10 @@ impl std::str::FromStr for SignInMethod {
             "password_only" => SignInMethod::PasswordOnly,
             "passkey" => SignInMethod::Passkey,
             "email_link" => SignInMethod::EmailLink,
+            "email_code" => SignInMethod::EmailCode,
+            "email+totp" => SignInMethod::EmailTotp,
+            "email+recovery_code" => SignInMethod::EmailRecoveryCode,
+            "email+passkey" => SignInMethod::EmailPasskey,
             "step_up" => SignInMethod::StepUp,
             other => SignInMethod::App(AppMethod::new(other)?),
         })
@@ -460,6 +486,7 @@ mod tests {
             "password_only",
             "passkey",
             "email_link",
+            "email_code",
             "step_up",
             "a\nb",
             &"x".repeat(33),
@@ -496,11 +523,17 @@ mod tests {
             "password_only",
             "passkey",
             "email_link",
+            "email_code",
+            "email+totp",
+            "email+recovery_code",
+            "email+passkey",
             "step_up",
             "desktop_bridge",
         ] {
             assert_eq!(name.parse::<SignInMethod>()?.as_str(), name);
         }
+        assert!(SignInMethod::EmailLink.is_email() && SignInMethod::EmailCode.is_email());
+        assert!(!SignInMethod::Password.is_email() && !SignInMethod::EmailTotp.is_email());
         assert!("Bad Method".parse::<SignInMethod>().is_err());
         Ok(())
     }

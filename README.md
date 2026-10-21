@@ -13,7 +13,8 @@ It was extracted from an axum sign-in service (latchkey 0.2) and keeps its behav
 stored formats: Argon2id (64 MiB, t=3, p=2), TOTP (SHA-1, 6 digits, 30 s, ±1 step) with a
 replay guard, single-use recovery codes, passkeys with user verification, `__Host-` cookies,
 Origin and CSRF checks, a doubling lockout, a wrong-password throttle, new-device mail and an
-audit trail, now as pure functions and state machines.
+audit trail, now as pure functions and state machines. Since 0.4 an emailed link or code
+stands in for the password only: the second factor is always asked for.
 
 ## What is in it
 
@@ -29,8 +30,8 @@ audit trail, now as pure functions and state machines.
 | `account` | `Account`, `Email`, `Factors` (last-factor rules), `LockoutPolicy` and `Lockout` |
 | `limits` | `RateLimiter` (fixed windows), `WrongPasswordThrottle` (sliding window), and their per-key states |
 | `session` | `Session` records (with their step-up failure count), `Stage`, `SignInMethod`, `Session::authorize(active, Access, step_up_window, now)` |
-| `flow` | `sign_in`, `email_link`, `setup`, `invite`, `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
-| `mail` | `Mail` with `subject()` and `text()` for setup, sign-in link, invite and new-device mail |
+| `flow` | `sign_in`, `email_link` (link and 6-digit code), `setup`, `invite`, `reset` (the owner resets a member's sign-in), `step_up` as `advance(state, event, now, rng) -> Result<Transition, Refusal>`; `issue_session`, `sign_out` |
+| `mail` | `Mail` with `subject()` and `text()` for setup, sign-in link and code, invite, sign-in reset and new-device mail |
 | `audit` | `AuditEvent` and `AuditKind` |
 
 ### Features
@@ -74,9 +75,10 @@ verification result) and `now`, and returns either
 ```text
 sign_in:    Start -Password-> VerifyPassword -PasswordChecked-> SecondFactor -Code|Passkey-> SignedIn
             Start -PasskeyOnly-> SignedIn
-email_link: Start -Request-> Requested            Start -Redeem-> SignedIn
+email_link: Start -Request-> Requested            Start -Redeem|RedeemCode-> SecondFactor, then sign_in's SecondFactor
 setup:      Start -RequestLink-> LinkRequested    Start -Redeem-> InSetup -PasswordSet-> InSetup -Finish-> Complete
 invite:     Start -Send-> Sent
+reset:      Start -Reset-> Done                   then setup: Start -Redeem { kind: Invite }-> ...
 step_up:    Start -Password-> VerifyPassword -PasswordChecked-> Done      Start -Passkey-> Done
 ```
 
@@ -86,8 +88,10 @@ expensive hash, and an unknown address still costs a full (dummy) hash.
 Effects are values: `StoreSession { session, replaces }`, `DeleteSession`, `SetCookie`,
 `RecordFailure`, `ClearFailures`, `RecordWrongPassword`, `UseTotpStep`, `UseRecoveryCode`, `StoreRecoveryCodes`,
 `StoreLinkToken`, `SendMail`, `Audit`, `RememberDevice`, `CreateAccount`, `StorePassword`,
-`ActivateAccount`, `MarkStepUp`, and with per-session step-up failures `RecordStepUpFailure`
-and `ClearStepUpFailures`. Carry out every one, in order: storage effects ideally in one
+`ActivateAccount`, `MarkStepUp`, with per-session step-up failures `RecordStepUpFailure`
+and `ClearStepUpFailures`, for email codes `StoreEmailCode`, `ConsumeEmailCode`,
+`DeleteEmailCode` and `DeleteEmailSignIn`, and for a sign-in reset `RevokeSessions`,
+`RemoveFactors`, `DeactivateAccount` and `DeletePendingLinks`. Carry out every one, in order: storage effects ideally in one
 transaction, then mail. `UseTotpStep` and `UseRecoveryCode` are compare-and-set: if the stored
 step is already as new, or the code already used, the request lost a race and must be refused.
 `RecordFailure` must be **one atomic statement** that increments the stored count
@@ -208,6 +212,94 @@ mod passkey_sign_in {
 ```
 
 Only the browser holding the cookie can finish the ceremony it started.
+
+### Email sign-in: a link and a code
+
+`EmailLinkEvent::Request` mails one message with a single-use link and a 6-digit code, both
+valid for `config.link_ttl()` (5 minutes). The link works on any device; the code only on
+the device that asked, which gets a binding cookie (`config.email_cookie_name()`) whether or
+not the address exists. Redeeming either one deletes both, and neither signs in on its own:
+they replace the password, and the flow continues to the second factor exactly as after a
+password (`EmailLink::SecondFactor`, then `SignIn::second_factor(session, account)` with
+`SignInEvent::Code` or `Passkey`).
+
+A 6-digit code is only safe because it is bound to one pending request (its hash is keyed
+with the binding cookie, which is never stored), allows 5 guesses (each counted **before** it
+is checked, and also towards the account lockout), lives 5 minutes, and still needs the
+second factor. Keep all four.
+
+```rust
+use latchkey::flow::email_link::{EmailCodeRequest, EmailLink, EmailLinkEvent};
+use latchkey::flow::{Client, Effect, Refusal};
+use latchkey::token::SecretToken;
+use latchkey::{Account, Config, CryptoRng};
+use time::OffsetDateTime;
+
+/// POST /sign-in/email {email}: carry out the effects and answer 202 either way. They set
+/// the binding cookie and, for an active account outside the resend cooldown, store the link
+/// (`StoreLinkToken`) and the code (`StoreEmailCode`, under the cookie's hash) and mail both.
+fn request(
+    config: &Config,
+    account: Option<Account>,
+    last_sent_at: Option<OffsetDateTime>,
+    cookie: Option<&str>, // config.email_cookie_name()
+    client: Client,
+    now: OffsetDateTime,
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Effect>, Refusal> {
+    let binding = cookie.map(SecretToken::from_presented);
+    let event = EmailLinkEvent::Request { account, last_sent_at, binding, client };
+    Ok(EmailLink::Start.advance(config, event, now, rng)?.effects)
+}
+
+/// POST /sign-in/email/code {code}, with the binding cookie. `counted` is the row the app
+/// read with the attempt already counted, in one statement:
+/// `UPDATE email_codes SET attempts = attempts + 1 WHERE binding_hash = ? RETURNING ...`.
+/// On success, `ConsumeEmailCode` deletes the request and its link (both must still exist)
+/// and the client gets a second-factor session.
+fn redeem_code(
+    config: &Config,
+    cookie: Option<&str>,
+    code: String,
+    counted: Option<EmailCodeRequest>,
+    account: Option<Account>,
+    client: Client,
+    now: OffsetDateTime,
+    rng: &mut impl CryptoRng,
+) -> Result<(EmailLink, Vec<Effect>), Refusal> {
+    let binding = cookie.map(SecretToken::from_presented);
+    let event = EmailLinkEvent::RedeemCode { binding, code, request: counted, account, client };
+    let step = EmailLink::Start.advance(config, event, now, rng)?;
+    Ok((step.state, step.effects)) // EmailLink::SecondFactor: ask for TOTP or a passkey next
+}
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let config = Config::builder("owner@example.com", "https://home.example.com").build()?;
+# let mut rng = latchkey::os_rng()?;
+# let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+let effects = request(&config, None, None, None, Client::default(), now, &mut rng)?;
+assert!(matches!(effects.as_slice(), [Effect::SetCookie(_)]), "unknown address: cookie only");
+let refused = redeem_code(&config, None, "123456".into(), None, None, Client::default(), now, &mut rng);
+assert_eq!(refused.err().map(|refusal| refusal.error), Some(latchkey::Error::SignInFailed));
+# Ok(())
+# }
+```
+
+For the link, delete it by `TokenHash::of(token)` (`DELETE ... RETURNING`) and send
+`EmailLinkEvent::Redeem { token_hash, link, account, client }`; its `DeleteEmailCode`
+kills the code. `examples/email_link.rs` runs the whole path, second factor included.
+
+### Resetting a member who lost their second factor
+
+`flow::reset` gives the owner a "Reset sign-in" button: from the owner's recent session,
+`Reset::Start` with `ResetEvent::Reset { admin, session, member, remove_password, client }`
+revokes the member's sessions (`RevokeSessions`), removes their TOTP, passkeys and recovery
+codes and optionally their password (`RemoveFactors`), deactivates the account and clears
+its failures, deletes their older links and codes (`DeletePendingLinks`), and mails a
+one-time setup link valid for `config.invite_ttl()` (24 hours) as `MailKind::SignInReset`,
+with an `AuditKind::SignInReset` event (detail `by:<owner id>`). The link is an invite link:
+the member finishes it through `Setup` with `Redeem { kind: LinkKind::Invite }`, enrolling
+a new second factor (and a password if theirs was removed) before `Finish`.
 
 ### Plain-HTTP development on localhost
 
@@ -389,6 +481,25 @@ impl App {
 `examples/email_link.rs` and `examples/passkey_registration.rs` (feature `passkeys`) show
 the other two common paths.
 
+## Migrating from 0.3.0
+
+0.4 changes email sign-in: a link no longer signs in on its own, the same mail carries a
+code, and links and invites live shorter. Apps on 0.3.0 change these lines:
+
+| 0.3.0 | 0.4.0 |
+|---|---|
+| `EmailLinkEvent::Request { account, last_sent_at, client }` | add `binding: find_cookie(.., config.email_cookie_name().as_str()).map(SecretToken::from_presented)`, and carry out the `SetCookie` it returns, for unknown addresses too |
+| `EmailLinkEvent::Redeem { link, account, client }` | add `token_hash: TokenHash::of(token)` (the hash the link was deleted by) |
+| `EmailLink::SignedIn` after redeeming a link | `EmailLink::SecondFactor { account, session }`: the client has a second-factor session; continue with `SignIn::second_factor(session, account)` and `SignInEvent::Code` / `Passkey`, as after a password. `SignedIn` is left only for accounts a password alone signs in (`PasswordOnly::AllowedUntilEnrolled`, no second factor) |
+| (nothing) | store pending codes: an `email_codes` table keyed by the binding hash with `EmailCodeRequest`'s fields; handle `StoreEmailCode`, `ConsumeEmailCode`, `DeleteEmailCode`, `DeleteEmailSignIn`; add a code endpoint sending `EmailLinkEvent::RedeemCode`; show `mail.code` in your own mail templates; purge expired codes with expired links |
+| (nothing) | for "Reset sign-in": `flow::reset` and the effects `RevokeSessions`, `RemoveFactors`, `DeactivateAccount`, `DeletePendingLinks`; `MailKind::SignInReset` in your templates |
+| `link_ttl` 15 minutes, `invite_ttl` 3 days by default | 5 minutes and 24 hours; set `.link_ttl(..)` / `.invite_ttl(..)` to keep the old values (keep `link_ttl` short: it is also the code's life) |
+| full sessions with method `email_link` | still parse; new sign-ins record `email+totp`, `email+recovery_code` or `email+passkey`, and second-factor sessions `email_link` or `email_code` |
+| an app method or cookie named `email_code` or `__Host-latchkey_email` | pick another name: both are latchkey's now |
+| a `match` on `Effect`, `MailKind`, `AuditKind` or `SignInMethod` | handle the new variants (they are `#[non_exhaustive]`, so a `_` arm compiles, but the new effects must be carried out) |
+
+Stored data is unchanged; rows written by 0.3.0 keep working.
+
 ## Migrating from 0.3.0-dev
 
 Apps on latchkey 0.3.0-dev (from crates.io or git, such as Home and the portfolio) change
@@ -443,7 +554,7 @@ in-memory limiters. 0.3 keeps the decisions and leaves the I/O to the app.
 | `Latchkey::encrypt_plaintext_secrets` | `seal::classify_bytes`/`classify_text` find 0.1 plaintext; reseal with `DataKey::seal_bytes`/`seal_text` and `Aad::totp`/`Aad::passkey` |
 | Start-up check of sealed values | Open each stored value with `DataKey::open_totp`/`open_text` at start if you want the same refusal |
 | `Latchkey::reset_owner` | Delete the owner's password, factors and sessions, set it inactive, append `AuditKind::OwnerReset` |
-| `Latchkey::purge_expired` | Delete sessions and links past `expires_at`, devices unseen for `config.device_ttl()` |
+| `Latchkey::purge_expired` | Delete sessions, links and email codes past `expires_at`, devices unseen for `config.device_ttl()` |
 | `Error` with `IntoResponse` | `Error::code()`, `Error::http_status()`, `Error::detail()`, `Error::retry_after_secs()`; build the JSON body yourself |
 | `async_trait`, `tokio`, `axum`, `sqlx`, `tracing` dependencies | Gone. Run `PasswordHasher` on a blocking thread with a semaphore of one, as 0.2 did |
 
@@ -454,7 +565,7 @@ Endpoints to flow calls:
 | `POST /setup/start`, `/setup/redeem`, `/setup/password`, `/setup/complete` | `Setup`: `RequestLink`, `Redeem { kind: Setup }`, `PasswordSet`, `Finish` |
 | `POST /invites`, `/invites/redeem` | `Invite::Send`, then `Setup` with `Redeem { kind: Invite }` |
 | `POST /sign-in/password`, `/sign-in/code`, `/sign-in/second-factor/passkey/*`, `/sign-in/passkey/*` | `SignIn`: `Password` + `PasswordChecked`, `Code`, `Passkey`, `PasskeyOnly` |
-| `POST /sign-in/email`, `/sign-in/email/redeem` | `EmailLink`: `Request`, `Redeem` |
+| `POST /sign-in/email`, `/sign-in/email/redeem` | `EmailLink`: `Request`, `Redeem` (then `SignIn`'s second factor; new: `RedeemCode`) |
 | `POST /step-up/password`, `/step-up/passkey/*` | `StepUp`: `Password` + `PasswordChecked`, `Passkey` |
 | `POST /sign-out` | `flow::sign_out` |
 | `POST /password`, `/recovery-codes` | `flow::password_changed`, `flow::regenerate_recovery_codes` (after `Access::Recent`) |
@@ -462,7 +573,9 @@ Endpoints to flow calls:
 | `/passkeys/register/*`, `DELETE /passkeys/{id}` | `RelyingParty::start_registration`/`finish_registration`; `Factors::may_remove_passkey` |
 | `GET /me`, `/sessions`, `DELETE /sessions/{id}`, `GET /audit` | Your queries; `Session::step_up_until` for `step_up_until` |
 
-Behavioural changes: `step_up` joins the reserved method names for app-issued sessions;
+Behavioural changes: email links (and the new codes) no longer sign in on their own but
+lead to the second factor, and live 5 minutes instead of 15; `step_up` joins the reserved
+method names for app-issued sessions;
 `RelyingParty::finish_discoverable` takes the claimed user and refuses an assertion whose
 user handle differs; the device cookie is still set on every completed sign-in.
 
@@ -470,11 +583,14 @@ user handle differs; the device cookie is still set on every completed sign-in.
 
 - Passwords: Argon2id; an unknown account verifies against a dummy hash and fails the same
   way as a wrong password. Passwords over 4096 bytes are not hashed as given.
-- Tokens (sessions, links, devices, CSRF) are 32 random bytes; only SHA-256 hashes are
+- Tokens (sessions, links, devices, email-code bindings, CSRF) are 32 random bytes; only SHA-256 hashes are
   stored, except the session's CSRF token, which the client needs again. Comparisons of
   presented secrets are constant-time.
-- A TOTP step is accepted once (`last_used_step`); recovery codes, links and passkey
-  ceremonies are single use; passkey ceremonies are bound to the session and account that
+- A TOTP step is accepted once (`last_used_step`); recovery codes, links, email codes and
+  passkey ceremonies are single use; an emailed link or code replaces only the password,
+  never the second factor. An email code is 6 digits, so it is bound to the requesting
+  device's cookie (its hash is keyed with it), allows 5 counted guesses (which also count
+  towards the lockout), and lives 5 minutes; using the link or the code deletes both; passkey ceremonies are bound to the session and account that
   started them (a sign-in, which has no session yet, to the browser by a one-off cookie) and
   expire after 5 minutes; counter regressions are rejected by webauthn-rs.
 - Every stage change issues a new session token (`StoreSession { replaces }`).
@@ -484,9 +600,9 @@ user handle differs; the device cookie is still set on every completed sign-in.
   `PerSession { limit }`, which bounds each session to `limit` wrong guesses and then ends it.
 - Sealed values use a random 96-bit nonce and associated data `latchkey-totp:<user>` or
   `latchkey-passkey:<user>:<passkey>`; `Aad::app(context)` is for the app's own secrets.
-- Secret types (`SecretToken`, `TotpSecret`, `RecoveryCode`, `PasswordHash`, `SetCookie`,
-  `DataKey`, `IpTagKey`, `Mail` links) redact `Debug`, have no `Display`, and zero their
-  memory on drop where they own it.
+- Secret types (`SecretToken`, `EmailCode`, `TotpSecret`, `RecoveryCode`, `PasswordHash`,
+  `SetCookie`, `DataKey`, `IpTagKey`, `Mail` links and codes) redact `Debug`, have no
+  `Display`, and zero their memory on drop where they own it.
 - No `unsafe`; `unwrap`, `expect`, `panic!` and indexing are denied outside tests.
 - Randomness comes from the `CryptoRng` you pass, except webauthn-rs challenges, which it
   draws from OpenSSL.
@@ -499,7 +615,7 @@ per browser profile; anyone with both the database and the data key can read fac
 
 `cargo test --all-features` runs unit tests, property tests (`proptest`: token and cookie
 parsing, the limiter against a fixed-window model, the throttle against a sliding-window
-model, the lockout, TOTP replay, sealing) and integration tests that drive every flow through
+model, the lockout, TOTP replay, sealing, email codes) and integration tests that drive every flow through
 an in-memory app (`tests/common`), including a software passkey.
 
 `fuzz/` has a [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) target,

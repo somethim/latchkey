@@ -17,9 +17,10 @@
 //! | Flow | Module | Starts | Ends |
 //! |---|---|---|---|
 //! | Password, then TOTP, recovery code or passkey; or a passkey alone | [`sign_in`] | [`SignIn::Start`](sign_in::SignIn::Start) | [`SignIn::SignedIn`](sign_in::SignIn::SignedIn) |
-//! | Emailed sign-in link | [`email_link`] | [`EmailLink::Start`](email_link::EmailLink::Start) | [`EmailLink::SignedIn`](email_link::EmailLink::SignedIn) |
+//! | Emailed sign-in link or code, then a second factor | [`email_link`], then [`sign_in`] | [`EmailLink::Start`](email_link::EmailLink::Start) | [`SignIn::SignedIn`](sign_in::SignIn::SignedIn) |
 //! | First-open owner setup, and an invitee's setup | [`setup`] | [`Setup::Start`](setup::Setup::Start) | [`Setup::Complete`](setup::Setup::Complete) |
 //! | The owner invites a member | [`invite`] | [`Invite::Start`](invite::Invite::Start) | [`Invite::Sent`](invite::Invite::Sent) |
+//! | The owner resets a member's sign-in (lost second factor) | [`reset`], then [`setup`] | [`Reset::Start`](reset::Reset::Start) | [`Reset::Done`](reset::Reset::Done) |
 //! | Step-up re-authentication | [`step_up`] | [`StepUp::new`](step_up::StepUp::new) | [`StepUp::Done`](step_up::StepUp::Done) |
 //!
 //! Single-step actions are plain functions: [`issue_session`], [`sign_out`],
@@ -27,6 +28,7 @@
 
 pub mod email_link;
 pub mod invite;
+pub mod reset;
 pub mod setup;
 pub mod sign_in;
 pub mod step_up;
@@ -47,6 +49,7 @@ use crate::recovery::{self, RecoveryCode, RecoveryCodeHash};
 use crate::session::{AppMethod, Session, SignInMethod, Stage};
 use crate::token::{self, SecretToken, TokenHash};
 use crate::totp::{self, TotpSecret, TotpStep};
+use email_link::EmailCodeRequest;
 
 /// What a one-time link is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -318,6 +321,62 @@ pub enum Effect {
         /// The record.
         link: LinkToken,
     },
+    /// Store a pending email sign-in code under the hash of the requesting device's binding
+    /// cookie, replacing any request already stored under it. See
+    /// [`email_link`](email_link#what-the-app-stores).
+    StoreEmailCode {
+        /// Look-up key: the hash of the binding cookie.
+        binding_hash: TokenHash,
+        /// The record.
+        request: EmailCodeRequest,
+    },
+    /// A sign-in link was redeemed: delete the pending code mailed with it (the request whose
+    /// `link_hash` is this), if any.
+    DeleteEmailCode {
+        /// The redeemed link's hash.
+        link_hash: TokenHash,
+    },
+    /// An email code was accepted: delete the pending request under `binding_hash` **and**
+    /// the link under `link_hash` in one transaction, compare-and-set. If either was already
+    /// gone, the link or another guess won a race: refuse the sign-in.
+    ConsumeEmailCode {
+        /// The binding cookie's hash.
+        binding_hash: TokenHash,
+        /// The link mailed with the code.
+        link_hash: TokenHash,
+    },
+    /// An email sign-in request ended unused (its attempt budget is spent, it expired, or its
+    /// account is gone): delete the pending request and its link.
+    DeleteEmailSignIn {
+        /// The binding cookie's hash.
+        binding_hash: TokenHash,
+        /// The link mailed with the code.
+        link_hash: TokenHash,
+    },
+    /// Delete every session of the account.
+    RevokeSessions {
+        /// Whose.
+        user_id: UserId,
+    },
+    /// Remove the account's second factors: its TOTP secret (confirmed and pending), every
+    /// passkey and every recovery code, and with `password` its password too. Reset its
+    /// last used TOTP step.
+    RemoveFactors {
+        /// Whose.
+        user_id: UserId,
+        /// Whether to remove the password as well.
+        password: bool,
+    },
+    /// Mark the account inactive (it signs in again only after setup).
+    DeactivateAccount {
+        /// Whose.
+        user_id: UserId,
+    },
+    /// Delete every one-time link and pending email code of the account.
+    DeletePendingLinks {
+        /// Whose.
+        user_id: UserId,
+    },
     /// Send this mail.
     SendMail(Mail),
     /// Append this audit event.
@@ -522,17 +581,17 @@ fn recognise_device<R: CryptoRng + ?Sized>(
         effects.push(Effect::Audit(
             audit(AuditKind::NewDevice, Some(account.id), client, now).with_detail(method.as_str()),
         ));
-        effects.push(Effect::SendMail(Mail {
-            kind: MailKind::NewDevice,
-            to: account.email.clone(),
-            link: config.sessions_url().to_owned(),
-            expires_at: None,
-            sign_in: Some(SignInDetails {
+        effects.push(Effect::SendMail(Mail::new(
+            MailKind::NewDevice,
+            account.email.clone(),
+            config.sessions_url(),
+            None,
+            Some(SignInDetails {
                 at: now,
                 method: method.clone(),
                 user_agent: client.user_agent.clone(),
             }),
-        }));
+        )));
     }
     effects.push(Effect::SetCookie(SetCookie::new(
         config.device_cookie_name().clone(),
@@ -556,7 +615,44 @@ fn failure(account: &Account, detail: &str, client: &Client, now: OffsetDateTime
     ]
 }
 
-/// Issues a link and mails it, unless the resend cooldown is running (not for invites).
+/// A freshly issued one-time link: the record and hash to store and the URL to mail.
+pub(crate) struct IssuedLink {
+    pub(crate) token_hash: TokenHash,
+    pub(crate) link: LinkToken,
+    pub(crate) url: String,
+}
+
+/// Issues a link of `kind` for `account`: `link_ttl`, or `invite_ttl` for invites.
+pub(crate) fn issue_link<R: CryptoRng + ?Sized>(
+    config: &Config,
+    account: &Account,
+    kind: LinkKind,
+    now: OffsetDateTime,
+    rng: &mut R,
+) -> IssuedLink {
+    let (ttl, mut url) = match kind {
+        LinkKind::Setup => (config.link_ttl(), config.setup_target().clone()),
+        LinkKind::SignIn => (config.link_ttl(), config.sign_in_link_target().clone()),
+        LinkKind::Invite => (config.invite_ttl(), config.invite_target().clone()),
+    };
+    let issued = token::issue(rng);
+    url.query_pairs_mut()
+        .append_pair("token", issued.token.expose_secret());
+    IssuedLink {
+        token_hash: issued.hash,
+        link: LinkToken {
+            kind,
+            user_id: account.id,
+            created_at: now,
+            expires_at: now.saturating_add(ttl),
+        },
+        url: url.into(),
+    }
+}
+
+/// Issues a setup or invite link and mails it, unless the resend cooldown is running (not
+/// for invites). Sign-in links, which carry a code too, are mailed by
+/// [`email_link`].
 fn send_link<R: CryptoRng + ?Sized>(
     config: &Config,
     account: &Account,
@@ -571,48 +667,40 @@ fn send_link<R: CryptoRng + ?Sized>(
     {
         return Vec::new();
     }
-    let (ttl, mut link, mail_kind, audit_kind) = match kind {
-        LinkKind::Setup => (
-            config.link_ttl(),
-            config.setup_target().clone(),
-            MailKind::Setup,
-            AuditKind::SetupLinkSent,
-        ),
-        LinkKind::SignIn => (
-            config.link_ttl(),
-            config.sign_in_link_target().clone(),
-            MailKind::SignInLink,
-            AuditKind::SignInLinkSent,
-        ),
-        LinkKind::Invite => (
-            config.invite_ttl(),
-            config.invite_target().clone(),
-            MailKind::Invite,
-            AuditKind::InviteSent,
-        ),
+    let (mail_kind, audit_kind) = match kind {
+        LinkKind::Setup => (MailKind::Setup, AuditKind::SetupLinkSent),
+        LinkKind::SignIn => (MailKind::SignInLink, AuditKind::SignInLinkSent),
+        LinkKind::Invite => (MailKind::Invite, AuditKind::InviteSent),
     };
-    let issued = token::issue(rng);
-    let expires_at = now.saturating_add(ttl);
-    link.query_pairs_mut()
-        .append_pair("token", issued.token.expose_secret());
+    mail_link(
+        account,
+        issue_link(config, account, kind, now, rng),
+        mail_kind,
+        audit(audit_kind, Some(account.id), client, now),
+    )
+}
+
+/// Stores `issued`, mails it as `mail_kind` and appends `event`.
+fn mail_link(
+    account: &Account,
+    issued: IssuedLink,
+    mail_kind: MailKind,
+    event: AuditEvent,
+) -> Vec<Effect> {
+    let expires_at = issued.link.expires_at;
     vec![
         Effect::StoreLinkToken {
-            token_hash: issued.hash,
-            link: LinkToken {
-                kind,
-                user_id: account.id,
-                created_at: now,
-                expires_at,
-            },
+            token_hash: issued.token_hash,
+            link: issued.link,
         },
-        Effect::SendMail(Mail {
-            kind: mail_kind,
-            to: account.email.clone(),
-            link: link.into(),
-            expires_at: Some(expires_at),
-            sign_in: None,
-        }),
-        Effect::Audit(audit(audit_kind, Some(account.id), client, now)),
+        Effect::SendMail(Mail::new(
+            mail_kind,
+            account.email.clone(),
+            issued.url,
+            Some(expires_at),
+            None,
+        )),
+        Effect::Audit(event),
     ]
 }
 

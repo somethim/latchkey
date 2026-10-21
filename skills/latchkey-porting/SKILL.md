@@ -30,7 +30,8 @@ SQLite database keeps working with the app's own queries.
    `StoreSession { replaces }`, and mail sent after commit with `Mail::subject()`/`text()`.
 5. Replace each 0.2 endpoint with a route that loads data, calls the matching flow, applies
    effects and answers: `/sign-in/password` + `/sign-in/code` with `flow::sign_in`,
-   `/sign-in/email*` with `flow::email_link`, `/setup/*` and `/invites/redeem` with
+   `/sign-in/email*` with `flow::email_link` (0.2 links signed in directly; 0.4 asks for
+   the second factor after the link or the new code), `/setup/*` and `/invites/redeem` with
    `flow::setup`, `/invites` with `flow::invite`, `/step-up/*` with `flow::step_up`,
    `/sign-out` with `flow::sign_out`.
 6. Replace the `CurrentUser`/`RecentAuth` extractors with an extractor of the app's own that
@@ -66,6 +67,15 @@ foreign session with a latchkey one on first use.
   `DataKey::seal_totp`. Secrets under 128 bits (16-character, 80-bit secrets) are refused:
   ask those accounts to enrol again, and allow sign-in meanwhile only if you opt into
   `PasswordOnly::AllowedUntilEnrolled`.
+
+## From 0.3.0 to 0.4.0
+
+Follow "Migrating from 0.3.0" in the README: email links no longer sign in on their own
+(`EmailLink::SecondFactor`, then the sign-in flow's second factor), `EmailLinkEvent::Request`
+takes `binding` (the `config.email_cookie_name()` cookie) and `Redeem` takes `token_hash`,
+pending email codes need a table and the `StoreEmailCode` / `ConsumeEmailCode` /
+`DeleteEmailCode` / `DeleteEmailSignIn` effects, `link_ttl` is 5 minutes and `invite_ttl`
+24 hours by default, and `flow::reset` adds the owner's "Reset sign-in".
 
 ## From a 0.3.0-dev build
 

@@ -21,7 +21,7 @@
 //! | [`account`] | Accounts, emails, factors and the lockout rule |
 //! | [`limits`] | Rate limits and the wrong-password throttle as state machines |
 //! | [`session`] | Session records, stages and access rules (step-up window) |
-//! | [`flow`] | Setup, invite, sign-in, email link and step-up as `advance(state, event, now)` |
+//! | [`flow`] | Setup, invite, sign-in, email link and code, sign-in reset and step-up as `advance(state, event, now)` |
 //! | [`mail`] | Mail subjects and bodies |
 //! | [`audit`] | Audit events |
 //!
@@ -80,7 +80,8 @@
 //! - Carry out every [`flow::Effect`], including those of a [`flow::Refusal`]: they count
 //!   failures, lock accounts, mail new-device notices and write the audit log.
 //! - Persist the TOTP step and recovery-code use with a compare-and-set, consume one-time
-//!   links and passkey ceremonies atomically, and refuse when the compare-and-set loses.
+//!   links, email codes and passkey ceremonies atomically, and refuse when the compare-and-set
+//!   loses. Count an email-code guess before checking it.
 //! - Run the throttle and lockout checks (the first step of each password flow) before
 //!   hashing, and hash on a blocking thread with limited concurrency.
 //! - Never pass a client-chosen user id to [`flow::issue_session`].
@@ -179,6 +180,11 @@ pub mod fuzzing {
         let now = OffsetDateTime::UNIX_EPOCH;
         let _ = crate::token::TokenHash::of(&text);
         let _ = crate::token::TokenHash::of_foreign(&text);
+        let _ = crate::flow::email_link::EmailCodeHash::of(&text, &text);
+        let _ = crate::flow::email_link::EmailCodeHash::of(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            &text,
+        );
         let _ = crate::recovery::RecoveryCodeHash::of(&text);
         if let Ok(secret) = crate::totp::TotpSecret::from_bytes(vec![0; 20]) {
             let _ = crate::totp::verify(&secret, &text, None, now);

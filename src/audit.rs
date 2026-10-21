@@ -58,6 +58,8 @@ pub enum AuditKind {
     OwnerReset,
     /// A sign-in completed on a device the account had not used.
     NewDevice,
+    /// The owner reset an account's sign-in; the detail names the owner (`by:<user id>`).
+    SignInReset,
 }
 
 impl AuditKind {
@@ -84,6 +86,7 @@ impl AuditKind {
             AuditKind::RecoveryCodeUsed => "recovery_code_used",
             AuditKind::OwnerReset => "owner_reset",
             AuditKind::NewDevice => "new_device",
+            AuditKind::SignInReset => "sign_in_reset",
         }
     }
 }

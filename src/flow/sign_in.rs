@@ -19,6 +19,11 @@
 //!
 //! The `SecondFactor` state lives in the session the password step started: rebuild it with
 //! [`SignIn::second_factor`] from the stored session and the account on the next request.
+//! An emailed link or code ([`email_link`](super::email_link)) starts the same kind of
+//! session in place of the password; the second factor then completes it the same way, and
+//! the full session records [`SignInMethod::EmailTotp`],
+//! [`EmailRecoveryCode`](SignInMethod::EmailRecoveryCode) or
+//! [`EmailPasskey`](SignInMethod::EmailPasskey).
 
 use rand_core::CryptoRng;
 use time::OffsetDateTime;
@@ -50,7 +55,8 @@ pub enum SignIn {
         /// The throttle key for the typed address.
         key: AccountKey,
     },
-    /// Password accepted; a second-factor session was started.
+    /// Password accepted; a second-factor session was started. Also rebuilt with
+    /// [`SignIn::second_factor`] after an emailed link or code.
     SecondFactor {
         /// Whose.
         account: Account,
@@ -229,9 +235,14 @@ impl SignIn {
                     let effects = failure(&account, "code", &client, now);
                     return Err(Refusal::new(Error::SignInFailed, effects));
                 };
-                let method = match matched {
-                    super::CodeMatch::Totp(_) => SignInMethod::PasswordTotp,
-                    super::CodeMatch::RecoveryCode(_) => SignInMethod::PasswordRecoveryCode,
+                let email = session.method.as_ref().is_some_and(SignInMethod::is_email);
+                let method = match (matched, email) {
+                    (super::CodeMatch::Totp(_), false) => SignInMethod::PasswordTotp,
+                    (super::CodeMatch::RecoveryCode(_), false) => {
+                        SignInMethod::PasswordRecoveryCode
+                    }
+                    (super::CodeMatch::Totp(_), true) => SignInMethod::EmailTotp,
+                    (super::CodeMatch::RecoveryCode(_), true) => SignInMethod::EmailRecoveryCode,
                 };
                 let mut effects = use_code(&account, matched, &client, now);
                 let (session, done) = complete_sign_in(
@@ -257,10 +268,15 @@ impl SignIn {
                 if !verified {
                     return Err(Error::SignInFailed.into());
                 }
+                let method = if session.method.as_ref().is_some_and(SignInMethod::is_email) {
+                    SignInMethod::EmailPasskey
+                } else {
+                    SignInMethod::PasswordPasskey
+                };
                 let (session, effects) = complete_sign_in(
                     config,
                     &account,
-                    &SignInMethod::PasswordPasskey,
+                    &method,
                     &client,
                     Some(session.token_hash),
                     now,
